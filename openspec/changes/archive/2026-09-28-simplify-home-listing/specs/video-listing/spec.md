@@ -1,74 +1,4 @@
-# video-listing Specification
-
-## Purpose
-
-Provides an HTTP endpoint to list the videos belonging to a single tracked playlist, so a playlist's contents can be browsed.
-
-## Requirements
-
-### Requirement: List Videos For A Playlist
-The system SHALL provide an HTTP endpoint that, given a tracked playlist's ID, returns every video recorded for that playlist, including each video's ID, title, status, quality (when downloaded), filename (when downloaded), thumbnail filename (when present), duration in seconds (when present), whether it has been watched, and its saved playback position in seconds. For a YouTube-linked playlist, the returned videos SHALL be ordered by their current position in the source YouTube playlist. For a custom playlist, no particular order is guaranteed.
-
-#### Scenario: Playlist has videos
-- **WHEN** a client requests the videos of a tracked playlist that has one or more recorded videos
-- **THEN** the daemon responds with HTTP status 200 and a list containing each of those videos
-
-#### Scenario: Playlist has no videos
-- **WHEN** a client requests the videos of a tracked playlist that has no recorded videos
-- **THEN** the daemon responds with HTTP status 200 and an empty list
-
-#### Scenario: Playlist does not exist
-- **WHEN** a client requests the videos of a playlist ID that is not currently tracked
-- **THEN** the daemon responds with HTTP status 400 and does not return a list
-
-#### Scenario: YouTube-linked playlist's videos are ordered by playlist position
-- **WHEN** a client requests the videos of a YouTube-linked playlist
-- **THEN** the daemon returns them ordered by their position in the source YouTube playlist, matching the order they appear in on YouTube
-
-#### Scenario: Playlist videos include their watch state
-- **WHEN** a client requests the videos of a tracked playlist that has a watched video and a partly watched video
-- **THEN** each returned video reports whether it has been watched and its saved playback position
-
-### Requirement: List Videos For A Channel
-The system SHALL provide an HTTP endpoint that, given a tracked channel's handle, returns every video recorded for that channel, including each video's ID, title, status, quality (when downloaded), filename (when downloaded), thumbnail filename (when present), duration in seconds (when present), whether it has been watched, and its saved playback position in seconds, ordered by recency (most recently uploaded first).
-
-#### Scenario: Channel has videos
-- **WHEN** a client requests the videos of a tracked channel that has one or more recorded videos
-- **THEN** the daemon responds with HTTP status 200 and a list containing each of those videos, ordered most recent first
-
-#### Scenario: Channel has no videos
-- **WHEN** a client requests the videos of a tracked channel that has no recorded videos
-- **THEN** the daemon responds with HTTP status 200 and an empty list
-
-#### Scenario: Channel does not exist
-- **WHEN** a client requests the videos of a channel handle that is not currently tracked
-- **THEN** the daemon responds with HTTP status 400 and does not return a list
-
-#### Scenario: Channel videos include their watch state
-- **WHEN** a client requests the videos of a tracked channel that has a watched video and a partly watched video
-- **THEN** each returned video reports whether it has been watched and its saved playback position
-
-### Requirement: Listed Videos Include Sync Time
-The system SHALL include each video's recorded sync time in the responses that list the videos of a playlist and of a channel, and SHALL report it as absent for a video that has none.
-
-#### Scenario: Downloaded video is listed
-- **WHEN** a client lists the videos of a tracked playlist or channel that has a downloaded video
-- **THEN** that video's entry includes its sync time
-
-#### Scenario: Video without a sync time is listed
-- **WHEN** a client lists the videos of a tracked playlist or channel that has a video with no recorded sync time
-- **THEN** that video's entry reports its sync time as absent
-
-### Requirement: Listed Videos Include Their Metadata
-The system SHALL include each video's publish time, description and channel name, taken from its generated metadata, in the responses that list the videos of a playlist and of a channel. The description SHALL be the same truncated plot recorded for the video's metadata file. For a video whose metadata has not been generated, the system SHALL report all three as absent.
-
-#### Scenario: Video with generated metadata is listed
-- **WHEN** a client lists the videos of a tracked playlist or channel that has a video with generated metadata
-- **THEN** that video's entry includes its publish time, its description and the name of the channel that published it
-
-#### Scenario: Video without generated metadata is listed
-- **WHEN** a client lists the videos of a tracked playlist or channel that has a video whose metadata has not been generated
-- **THEN** that video's entry reports its publish time, description and channel name as absent, and every other field is still returned
+## MODIFIED Requirements
 
 ### Requirement: List Home Videos Across Sources
 The system SHALL provide an HTTP endpoint that returns, in one response, the downloaded videos of the three home sections across every tracked playlist and channel, so that a YouTube video appears in at most one section.
@@ -176,3 +106,17 @@ Each returned video SHALL include:
 #### Scenario: Playlist source has no avatar filename
 - **WHEN** a returned video's source is a playlist
 - **THEN** the source's avatar filename is absent
+
+## REMOVED Requirements
+
+### Requirement: List Recently Synced Videos Across Sources
+**Reason**: The home view loads "Latest videos" from the home listing, so nothing calls this endpoint any more.
+**Migration**: Use `GET /videos/home` and read its `latest` section (up to 18 videos, excluding those shown in the other sections).
+
+### Requirement: List Continue Watching Videos Across Sources
+**Reason**: Its only caller was the home view, which now uses the home listing.
+**Migration**: Use `GET /videos/home` and read its `continue_watching` section (up to 6 videos).
+
+### Requirement: List Quick Watch Videos Across Sources
+**Reason**: Its only caller was the home view, which now uses the home listing.
+**Migration**: Use `GET /videos/home` and read its `quick_watches` section (up to 6 videos, excluding those under continue watching).

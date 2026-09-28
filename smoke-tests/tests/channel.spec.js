@@ -31,14 +31,15 @@ test('channel lifecycle: add, download, play, resume, mark watched, sync, invali
   const videoTitle = await page.locator('main h3').first().innerText()
   await assertVideoPlays(page)
 
-  // Pausing a few seconds in reports the position, so reloading resumes
-  // from it instead of from the start.
+  // Pausing halfway through reports the position, so reloading resumes from
+  // it instead of from the start. Halfway stays below the 90% that would mark
+  // the video watched, whatever the channel's newest video happens to last.
   const video = page.locator('video')
   const progressReported = page.waitForResponse(
     (response) => response.url().endsWith('/progress') && response.request().method() === 'POST',
   )
   await video.evaluate((el) => {
-    el.currentTime = 5
+    el.currentTime = el.duration / 2
     el.pause()
   })
   expect((await progressReported).status()).toBe(204)

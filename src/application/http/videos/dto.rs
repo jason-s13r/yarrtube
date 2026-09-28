@@ -1,4 +1,4 @@
-use crate::domain::video::{RecentVideo, VideoSource, VideoView};
+use crate::domain::video::{HomeVideoView, HomeVideos, VideoSource, VideoView};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +61,7 @@ impl From<VideoView> for VideoResponse {
 }
 
 #[derive(Debug, Serialize, PartialEq)]
-pub struct RecentVideoSourceResponse {
+pub struct HomeVideoSourceResponse {
     pub kind: String,
     pub id: String,
     pub name: String,
@@ -70,19 +70,20 @@ pub struct RecentVideoSourceResponse {
 }
 
 #[derive(Debug, Serialize, PartialEq)]
-pub struct RecentVideoResponse {
+pub struct HomeVideoResponse {
     pub id: String,
     pub title: String,
     pub thumbnail_filename: Option<String>,
     pub duration_seconds: Option<i64>,
     pub watched: bool,
-    pub source: RecentVideoSourceResponse,
+    pub position_seconds: i64,
+    pub source: HomeVideoSourceResponse,
 }
 
-impl From<RecentVideo> for RecentVideoResponse {
-    fn from(recent_video: RecentVideo) -> Self {
-        let source = match recent_video.source {
-            VideoSource::Playlist { id, name, path } => RecentVideoSourceResponse {
+impl From<HomeVideoView> for HomeVideoResponse {
+    fn from(view: HomeVideoView) -> Self {
+        let source = match view.source {
+            VideoSource::Playlist { id, name, path } => HomeVideoSourceResponse {
                 kind: "playlist".to_string(),
                 id: id.as_str().to_string(),
                 name: name.as_str().to_string(),
@@ -94,7 +95,7 @@ impl From<RecentVideo> for RecentVideoResponse {
                 name,
                 path,
                 avatar_filename,
-            } => RecentVideoSourceResponse {
+            } => HomeVideoSourceResponse {
                 kind: "channel".to_string(),
                 id: handle.as_str().to_string(),
                 name,
@@ -103,12 +104,34 @@ impl From<RecentVideo> for RecentVideoResponse {
             },
         };
         Self {
-            watched: recent_video.video.is_watched(),
-            id: recent_video.video.youtube_id.as_str().to_string(),
-            title: recent_video.video.title,
-            thumbnail_filename: recent_video.video.thumbnail_filename,
-            duration_seconds: recent_video.video.duration_seconds,
+            id: view.youtube_id.as_str().to_string(),
+            title: view.title,
+            thumbnail_filename: view.thumbnail_filename,
+            duration_seconds: view.duration_seconds,
+            watched: view.watched,
+            position_seconds: view.position_seconds,
             source,
         }
     }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct HomeResponse {
+    pub continue_watching: Vec<HomeVideoResponse>,
+    pub quick_watches: Vec<HomeVideoResponse>,
+    pub latest: Vec<HomeVideoResponse>,
+}
+
+impl From<HomeVideos> for HomeResponse {
+    fn from(home: HomeVideos) -> Self {
+        Self {
+            continue_watching: cards(home.continue_watching),
+            quick_watches: cards(home.quick_watches),
+            latest: cards(home.latest),
+        }
+    }
+}
+
+fn cards(videos: Vec<HomeVideoView>) -> Vec<HomeVideoResponse> {
+    videos.into_iter().map(HomeVideoResponse::from).collect()
 }

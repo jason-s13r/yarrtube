@@ -31,8 +31,49 @@ test('playlist lifecycle: add, download, play, sync, duplicate error, delete', a
 
   await assertVideoPlays(page)
 
+  // Pausing halfway through records the position. The playlist's video (Big
+  // Buck Bunny, about 10 minutes) is long enough that halfway is past the 30
+  // seconds a video must reach to count as started, so the home view offers
+  // it to continue watching.
+  const progressReported = page.waitForResponse(
+    (response) => response.url().endsWith('/progress') && response.request().method() === 'POST',
+  )
+  await page.locator('video').evaluate((el) => {
+    el.currentTime = el.duration / 2
+    el.pause()
+  })
+  expect((await progressReported).status()).toBe(204)
+
   // Same video, with thumbnail + duration, on the home feed.
   await page.getByRole('link', { name: 'Yarrtube', exact: true }).click()
+  const continueWatching = page.locator('section', {
+    has: page.getByRole('heading', { name: 'Continue watching' }),
+  })
+  await expect(continueWatching.getByText(videoTitle, { exact: true })).toBeVisible()
+  await expect(continueWatching.getByRole('progressbar', { name: 'Watch progress' })).toBeVisible()
+  // A video shows in one home section only, so it isn't repeated below.
+  const latestVideos = page.locator('section', {
+    has: page.getByRole('heading', { name: 'Latest videos' }),
+  })
+  await expect(latestVideos).toBeVisible()
+  await expect(latestVideos.getByText(videoTitle, { exact: true })).toHaveCount(0)
+
+  // The home sections render in order: the two short shelves, then the
+  // longer "Latest videos". "Quick watches" only shows when a short video is
+  // downloaded, which the smoke playlist doesn't guarantee.
+  const homeSections = ['Continue watching', 'Quick watches', 'Latest videos']
+  await expect
+    .poll(async () => {
+      const headings = await page.locator('main h2').allInnerTexts()
+      return headings.filter((heading) => homeSections.includes(heading))
+    })
+    .toEqual(
+      expect.arrayContaining(['Continue watching', 'Latest videos']),
+    )
+  const headings = (await page.locator('main h2').allInnerTexts()).filter((heading) =>
+    homeSections.includes(heading),
+  )
+  expect(headings).toEqual(homeSections.filter((section) => headings.includes(section)))
   const homeCard = page.locator('main').getByRole('link').filter({ has: page.locator('img') }).first()
   await expect(homeCard).toBeVisible()
   await expect(homeCard.getByText(/^\d+:\d{2}(:\d{2})?$/)).toBeVisible()

@@ -10,6 +10,17 @@ use chrono::{DateTime, Duration, Utc};
 /// another download attempt.
 const ERRORED_RECOVERY_COOLDOWN: Duration = Duration::hours(24);
 
+/// How long after it was last played a started video is still offered to
+/// continue watching.
+const IN_PROGRESS_WINDOW: Duration = Duration::days(7);
+
+/// How far past the start playback must have got for a video to count as
+/// started rather than just opened.
+const IN_PROGRESS_MIN_POSITION_SECONDS: i64 = 30;
+
+/// A video shorter than this (15 minutes) counts as a quick watch.
+const QUICK_WATCH_MAX_DURATION_SECONDS: i64 = 900;
+
 /// A downloaded (or to-be-downloaded) video's own record: its download
 /// state, independent of any container. Container membership — which
 /// playlist(s) or channel(s) this video belongs to, and its position within
@@ -30,6 +41,7 @@ pub struct Video {
     pub playback_position: PlaybackPosition,
     pub synced_at: Option<DateTime<Utc>>,
     pub last_errored_at: Option<DateTime<Utc>>,
+    pub last_played_at: Option<DateTime<Utc>>,
 }
 
 const WATCHED_THRESHOLD: f64 = 0.9;
@@ -52,6 +64,7 @@ impl Video {
             playback_position: PlaybackPosition::start(),
             synced_at: None,
             last_errored_at: None,
+            last_played_at: None,
         }
     }
 
@@ -135,7 +148,7 @@ impl Video {
     /// reported. An unwatched video becomes watched at 90%; a watched one
     /// becomes unwatched again once a rewatch passes 10%, as long as it is
     /// still below 90%. With no known duration an unwatched video only keeps
-    /// the position.
+    /// the position. Whatever the outcome, the video counts as played `now`.
     pub fn update_watch_state(
         self,
         position: PlaybackPosition,
@@ -145,7 +158,7 @@ impl Video {
         let progress = self
             .known_duration_seconds(reported_duration)
             .map(|duration| position.seconds() as f64 / duration as f64);
-        match (self.is_watched(), progress) {
+        let updated = match (self.is_watched(), progress) {
             (true, Some(progress))
                 if progress > REWATCH_RESET_THRESHOLD && progress < WATCHED_THRESHOLD =>
             {
@@ -161,6 +174,10 @@ impl Video {
                 playback_position: position,
                 ..self
             },
+        };
+        Self {
+            last_played_at: Some(now),
+            ..updated
         }
     }
 
@@ -174,6 +191,24 @@ impl Video {
 
     pub fn is_watched(&self) -> bool {
         self.watched_at.is_some()
+    }
+
+    /// Downloaded, unwatched, position over 30s and last played within the
+    /// past 7 days of `now`: worth offering to continue watching.
+    pub fn is_in_progress(&self, now: DateTime<Utc>) -> bool {
+        !self.is_watched()
+            && self.playback_position.seconds() > IN_PROGRESS_MIN_POSITION_SECONDS
+            && self
+                .last_played_at
+                .is_some_and(|played_at| now - played_at <= IN_PROGRESS_WINDOW)
+    }
+
+    /// Downloaded, unwatched and recorded as shorter than 15 minutes.
+    pub fn is_quick_watch(&self) -> bool {
+        !self.is_watched()
+            && self
+                .duration_seconds
+                .is_some_and(|duration| duration < QUICK_WATCH_MAX_DURATION_SECONDS)
     }
 
     /// Whether reconcile should reset this video for another download: it

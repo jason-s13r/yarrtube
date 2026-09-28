@@ -7,6 +7,7 @@ const WATCH_STATE_SQL: &str = include_str!("../../../migrations/0002_watch_state
 const PUBLISHED_AT_AND_SYNCED_AT_SQL: &str =
     include_str!("../../../migrations/0003_published_at_and_synced_at.sql");
 const LAST_ERRORED_AT_SQL: &str = include_str!("../../../migrations/0004_last_errored_at.sql");
+const LAST_PLAYED_AT_SQL: &str = include_str!("../../../migrations/0005_last_played_at.sql");
 
 pub fn apply(conn: &mut Connection) -> anyhow::Result<()> {
     Migrations::new(vec![
@@ -14,6 +15,7 @@ pub fn apply(conn: &mut Connection) -> anyhow::Result<()> {
         M::up(WATCH_STATE_SQL),
         M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
         M::up(LAST_ERRORED_AT_SQL),
+        M::up(LAST_PLAYED_AT_SQL),
     ])
     .to_latest(conn)
     .inspect_err(|e| tracing::error!(error = %e, "failed to apply database migrations"))
@@ -23,6 +25,7 @@ pub fn apply(conn: &mut Connection) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Duration, Utc};
 
     #[test]
     fn it_should_create_every_table_on_a_fresh_in_memory_database() {
@@ -154,6 +157,60 @@ mod tests {
                     Some("2024-01-02T00:00:00+00:00".to_string())
                 ),
                 ("rec2".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_backfill_the_last_played_time_of_part_watched_videos_when_migrating() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO videos (id, youtube_id, title, status, created_at, updated_at, watched_at, playback_position_seconds)
+             VALUES ('rec1', 'yt1', 'Part Watched', 'DOWNLOADED', '2024-01-01T00:00:00+00:00', '2024-01-02T00:00:00+00:00', NULL, 120);
+             INSERT INTO videos (id, youtube_id, title, status, created_at, updated_at, watched_at, playback_position_seconds)
+             VALUES ('rec2', 'yt2', 'Watched', 'DOWNLOADED', '2024-01-01T00:00:00+00:00', '2024-01-03T00:00:00+00:00', '2024-01-03T00:00:00+00:00', 50);
+             INSERT INTO videos (id, youtube_id, title, status, created_at, updated_at, watched_at, playback_position_seconds)
+             VALUES ('rec3', 'yt3', 'Not Started', 'DOWNLOADED', '2024-01-01T00:00:00+00:00', '2024-01-04T00:00:00+00:00', NULL, 0);",
+        )
+        .unwrap();
+
+        let before = Utc::now() - Duration::seconds(1);
+
+        apply(&mut conn).unwrap();
+
+        let after = Utc::now();
+
+        let mut stmt = conn
+            .prepare("SELECT id, last_played_at FROM videos ORDER BY id")
+            .unwrap();
+        let played_at_migration: Vec<(String, Option<bool>)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap()
+            .map(|row| {
+                let (id, last_played_at) = row.unwrap();
+                let at_migration = last_played_at.map(|value| {
+                    let played_at = DateTime::parse_from_rfc3339(&value).unwrap();
+                    played_at >= before && played_at <= after
+                });
+                (id, at_migration)
+            })
+            .collect();
+        assert_eq!(
+            played_at_migration,
+            vec![
+                ("rec1".to_string(), Some(true)),
+                ("rec2".to_string(), None),
+                ("rec3".to_string(), None),
             ]
         );
     }

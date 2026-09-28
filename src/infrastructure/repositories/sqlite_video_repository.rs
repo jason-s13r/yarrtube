@@ -3,10 +3,11 @@ use crate::domain::video::{PlaybackPosition, Video, VideoStatus};
 use crate::domain::video::{VideoId, VideoRecordId};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
-const VIDEO_COLUMNS: &str = "id, youtube_id, title, status, quality, filename, thumbnail_filename, duration_seconds, created_at, updated_at, watched_at, playback_position_seconds, synced_at, last_errored_at";
+const VIDEO_COLUMNS: &str = "id, youtube_id, title, status, quality, filename, thumbnail_filename, duration_seconds, created_at, updated_at, watched_at, playback_position_seconds, synced_at, last_errored_at, last_played_at";
 
 /// A `videos` row as read, before its values are parsed into a `Video`.
 struct VideoRow {
@@ -24,6 +25,7 @@ struct VideoRow {
     playback_position_seconds: i64,
     synced_at: Option<String>,
     last_errored_at: Option<String>,
+    last_played_at: Option<String>,
 }
 
 pub trait VideoRepository: Send + Sync {
@@ -31,6 +33,9 @@ pub trait VideoRepository: Send + Sync {
     /// policy. Callers decide what `Video` value to persist.
     fn save(&self, video: &Video) -> anyhow::Result<()>;
     fn find(&self, id: &VideoRecordId) -> anyhow::Result<Option<Video>>;
+    /// The stored videos among `ids`, in the order given, skipping ids with
+    /// no stored video. One query however many ids.
+    fn find_many(&self, ids: &[VideoRecordId]) -> anyhow::Result<Vec<Video>>;
     /// Writes every mutable column, including `status` — unlike `save`,
     /// which is a plain insert-or-replace, `update` only touches a row that
     /// still exists.
@@ -75,8 +80,8 @@ impl VideoRepository for SqliteVideoRepository {
             .inspect_err(|_| tracing::error!(video_id = %video.id, "database lock poisoned"))
             .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
         conn.execute(
-            "INSERT INTO videos (id, youtube_id, title, status, quality, filename, thumbnail_filename, duration_seconds, created_at, updated_at, watched_at, playback_position_seconds, synced_at, last_errored_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "INSERT INTO videos (id, youtube_id, title, status, quality, filename, thumbnail_filename, duration_seconds, created_at, updated_at, watched_at, playback_position_seconds, synced_at, last_errored_at, last_played_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT (id) DO UPDATE SET
                 youtube_id = excluded.youtube_id,
                 title = excluded.title,
@@ -90,7 +95,8 @@ impl VideoRepository for SqliteVideoRepository {
                 watched_at = excluded.watched_at,
                 playback_position_seconds = excluded.playback_position_seconds,
                 synced_at = excluded.synced_at,
-                last_errored_at = excluded.last_errored_at",
+                last_errored_at = excluded.last_errored_at,
+                last_played_at = excluded.last_played_at",
             params![
                 video.id.as_str(),
                 video.youtube_id.as_str(),
@@ -106,6 +112,7 @@ impl VideoRepository for SqliteVideoRepository {
                 video.playback_position.seconds(),
                 video.synced_at.map(|s| s.to_rfc3339()),
                 video.last_errored_at.map(|e| e.to_rfc3339()),
+                video.last_played_at.map(|p| p.to_rfc3339()),
             ],
         )
         .inspect_err(|e| {
@@ -133,6 +140,35 @@ impl VideoRepository for SqliteVideoRepository {
         .transpose()
     }
 
+    fn find_many(&self, ids: &[VideoRecordId]) -> anyhow::Result<Vec<Video>> {
+        let conn = self
+            .conn
+            .lock()
+            .inspect_err(|_| tracing::error!("database lock poisoned"))
+            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {VIDEO_COLUMNS} FROM videos WHERE id IN ({placeholders})"
+            ))
+            .context("failed to prepare find many videos")?;
+        let mut found: HashMap<String, VideoRow> = stmt
+            .query_map(
+                params_from_iter(ids.iter().map(|id| id.as_str())),
+                Self::read_row,
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .inspect_err(|e| tracing::error!(error = %e, "failed to find many videos"))
+            .context("failed to find many videos")?
+            .into_iter()
+            .map(|row| (row.id.clone(), row))
+            .collect();
+        ids.iter()
+            .filter_map(|id| found.remove(id.as_str()))
+            .map(Self::row_to_video)
+            .collect()
+    }
+
     fn update(&self, video: &Video) -> anyhow::Result<()> {
         let conn = self
             .conn
@@ -140,7 +176,7 @@ impl VideoRepository for SqliteVideoRepository {
             .inspect_err(|_| tracing::error!(video_id = %video.id, "database lock poisoned"))
             .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
         conn.execute(
-            "UPDATE videos SET youtube_id = ?2, title = ?3, status = ?4, quality = ?5, filename = ?6, thumbnail_filename = ?7, duration_seconds = ?8, updated_at = ?9, watched_at = ?10, playback_position_seconds = ?11, synced_at = ?12, last_errored_at = ?13
+            "UPDATE videos SET youtube_id = ?2, title = ?3, status = ?4, quality = ?5, filename = ?6, thumbnail_filename = ?7, duration_seconds = ?8, updated_at = ?9, watched_at = ?10, playback_position_seconds = ?11, synced_at = ?12, last_errored_at = ?13, last_played_at = ?14
              WHERE id = ?1",
             params![
                 video.id.as_str(),
@@ -156,6 +192,7 @@ impl VideoRepository for SqliteVideoRepository {
                 video.playback_position.seconds(),
                 video.synced_at.map(|s| s.to_rfc3339()),
                 video.last_errored_at.map(|e| e.to_rfc3339()),
+                video.last_played_at.map(|p| p.to_rfc3339()),
             ],
         )
         .inspect_err(|e| {
@@ -217,6 +254,7 @@ impl SqliteVideoRepository {
             playback_position_seconds: row.get(11)?,
             synced_at: row.get(12)?,
             last_errored_at: row.get(13)?,
+            last_played_at: row.get(14)?,
         })
     }
 
@@ -244,6 +282,10 @@ impl SqliteVideoRepository {
             last_errored_at: row
                 .last_errored_at
                 .map(|e| Self::parse_timestamp(&e, "last_errored_at"))
+                .transpose()?,
+            last_played_at: row
+                .last_played_at
+                .map(|p| Self::parse_timestamp(&p, "last_played_at"))
                 .transpose()?,
         })
     }
@@ -282,6 +324,37 @@ mod tests {
         assert_eq!(found.youtube_id.as_str(), "yt1");
         assert_eq!(found.status, VideoStatus::Pending);
         assert_eq!(found.quality, None);
+    }
+
+    #[test]
+    fn it_should_find_many_videos_in_the_order_given_skipping_missing_ones() {
+        let repo = repo();
+        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let first = video("First", now);
+        let second = video("Second", now);
+        let unrequested = video("Unrequested", now);
+        repo.save(&first).unwrap();
+        repo.save(&second).unwrap();
+        repo.save(&unrequested).unwrap();
+
+        let found = repo.find_many(&[
+            second.id.clone(),
+            VideoRecordId::new_generated(),
+            first.id.clone(),
+        ]);
+
+        assert_eq!(found.unwrap(), vec![second, first]);
+    }
+
+    #[test]
+    fn it_should_find_many_of_no_ids() {
+        let repo = repo();
+        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        repo.save(&video("First", now)).unwrap();
+
+        let found = repo.find_many(&[]);
+
+        assert_eq!(found.unwrap(), vec![]);
     }
 
     #[test]
@@ -461,6 +534,39 @@ mod tests {
         let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
         let errored_at = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
         let video = video("First", now).mark_errored(errored_at);
+
+        repo.save(&video).unwrap();
+
+        assert_eq!(repo.find(&video.id).unwrap(), Some(video));
+    }
+
+    #[test]
+    fn it_should_round_trip_a_video_with_a_last_played_time() {
+        let repo = repo();
+        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let video = Video {
+            last_played_at: Some(DateTime::<Utc>::from_timestamp(100, 0).unwrap()),
+            ..video("First", now)
+        };
+        repo.save(&video).unwrap();
+        let replayed = Video {
+            last_played_at: Some(DateTime::<Utc>::from_timestamp(200, 0).unwrap()),
+            ..video.clone()
+        };
+
+        repo.update(&replayed).unwrap();
+
+        assert_eq!(repo.find(&video.id).unwrap(), Some(replayed));
+    }
+
+    #[test]
+    fn it_should_round_trip_a_video_never_played() {
+        let repo = repo();
+        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let video = Video {
+            last_played_at: None,
+            ..video("First", now)
+        };
 
         repo.save(&video).unwrap();
 

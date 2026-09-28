@@ -113,6 +113,7 @@ mod tests {
     use crate::domain::playlist_video::PlaylistVideo;
     use crate::domain::shared::Quality;
     use crate::domain::video::Video;
+    use crate::domain::video_metadata::VideoMetadata;
     use crate::infrastructure::repositories::sqlite_channel_repository::{
         ChannelRepository, SqliteChannelRepository,
     };
@@ -124,6 +125,9 @@ mod tests {
     };
     use crate::infrastructure::repositories::sqlite_playlist_video_repository::{
         PlaylistVideoRepository, SqlitePlaylistVideoRepository,
+    };
+    use crate::infrastructure::repositories::sqlite_video_metadata_repository::{
+        SqliteVideoMetadataRepository, VideoMetadataRepository,
     };
     use crate::infrastructure::repositories::sqlite_video_repository::{
         SqliteVideoRepository, VideoRepository,
@@ -156,6 +160,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_playlist(video_searcher, "PL1").await;
@@ -195,6 +200,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_playlist(video_searcher, "PL1").await;
@@ -237,6 +243,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_playlist(video_searcher, "PL1").await;
@@ -252,6 +259,95 @@ mod tests {
                 ..pending_video_response("vid1", "My Video")
             }])
         );
+    }
+
+    #[tokio::test]
+    async fn it_should_include_the_metadata_when_listing_playlist_videos() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_metadata_repository =
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection()));
+        let video_dir = tempfile::tempdir().unwrap();
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = Video::create(VideoId::new("vid1").unwrap(), "My Video", fixed_timestamp())
+            .start_download(fixed_timestamp())
+            .mark_downloaded(Quality::High, "My Video.mp4", None, None, fixed_timestamp());
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            "PL1",
+            &video,
+        );
+        video_metadata_repository
+            .save(&video.id, &video_metadata(), video_dir.path())
+            .unwrap();
+        let video_searcher = VideoSearcher::new(
+            playlist_repository,
+            playlist_video_repository,
+            Arc::new(SqliteChannelRepository::new(db.connection())),
+            Arc::new(SqliteChannelVideoRepository::new(db.connection())),
+            video_repository,
+            video_metadata_repository,
+        );
+
+        let response = list_for_playlist(video_searcher, "PL1").await;
+
+        assert_eq!(
+            response,
+            Ok(vec![VideoResponse {
+                status: "DOWNLOADED".to_string(),
+                quality: Some("high".to_string()),
+                filename: Some("My Video.mp4".to_string()),
+                synced_at: Some(fixed_timestamp()),
+                published_at: Some(published_timestamp()),
+                description: Some("A description\nwith two lines".to_string()),
+                channel_name: Some("Some Channel".to_string()),
+                ..pending_video_response("vid1", "My Video")
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_report_absent_metadata_when_listing_a_video_without_it() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_metadata_repository =
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection()));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = Video::create(VideoId::new("vid1").unwrap(), "My Video", fixed_timestamp());
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            "PL1",
+            &video,
+        );
+        let video_searcher = VideoSearcher::new(
+            playlist_repository,
+            playlist_video_repository,
+            Arc::new(SqliteChannelRepository::new(db.connection())),
+            Arc::new(SqliteChannelVideoRepository::new(db.connection())),
+            video_repository,
+            video_metadata_repository.clone(),
+        );
+
+        let response = list_for_playlist(video_searcher, "PL1").await;
+
+        assert_eq!(
+            response,
+            Ok(vec![VideoResponse {
+                published_at: None,
+                description: None,
+                channel_name: None,
+                ..pending_video_response("vid1", "My Video")
+            }])
+        );
+        assert_eq!(video_metadata_repository.find(&video.id).unwrap(), None);
     }
 
     #[tokio::test]
@@ -284,6 +380,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_playlist(video_searcher, "PL1").await;
@@ -344,6 +441,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_playlist(video_searcher, "PL1").await;
@@ -375,6 +473,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_playlist(video_searcher, "PL1").await;
@@ -393,6 +492,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_playlist(video_searcher, "PL404").await;
@@ -442,6 +542,7 @@ mod tests {
             channel_repository,
             channel_video_repository,
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_channel(video_searcher, "@somechannel").await;
@@ -452,6 +553,57 @@ mod tests {
                 pending_video_response("vid_newest", "Newest"),
                 pending_video_response("vid_oldest", "Oldest"),
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_include_the_metadata_when_listing_channel_videos() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let channel_video_repository = Arc::new(SqliteChannelVideoRepository::new(db.connection()));
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.connection()));
+        let video_metadata_repository =
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection()));
+        let video_dir = tempfile::tempdir().unwrap();
+        channel_repository
+            .insert(&channel("@somechannel", None))
+            .unwrap();
+        let video = Video::create(VideoId::new("vid1").unwrap(), "My Video", fixed_timestamp())
+            .start_download(fixed_timestamp())
+            .mark_downloaded(Quality::High, "My Video.mp4", None, None, fixed_timestamp());
+        save_channel_video(
+            video_repository.as_ref(),
+            channel_video_repository.as_ref(),
+            "@somechannel",
+            &video,
+            0,
+        );
+        video_metadata_repository
+            .save(&video.id, &video_metadata(), video_dir.path())
+            .unwrap();
+        let video_searcher = VideoSearcher::new(
+            Arc::new(SqlitePlaylistRepository::new(db.connection())),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection())),
+            channel_repository,
+            channel_video_repository,
+            video_repository,
+            video_metadata_repository,
+        );
+
+        let response = list_for_channel(video_searcher, "@somechannel").await;
+
+        assert_eq!(
+            response,
+            Ok(vec![VideoResponse {
+                status: "DOWNLOADED".to_string(),
+                quality: Some("high".to_string()),
+                filename: Some("My Video.mp4".to_string()),
+                synced_at: Some(fixed_timestamp()),
+                published_at: Some(published_timestamp()),
+                description: Some("A description\nwith two lines".to_string()),
+                channel_name: Some("Some Channel".to_string()),
+                ..pending_video_response("vid1", "My Video")
+            }])
         );
     }
 
@@ -496,6 +648,7 @@ mod tests {
             channel_repository,
             channel_video_repository,
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_channel(video_searcher, "@somechannel").await;
@@ -529,6 +682,7 @@ mod tests {
             channel_repository,
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_channel(video_searcher, "@somechannel").await;
@@ -547,6 +701,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_for_channel(video_searcher, "@missing").await;
@@ -580,6 +735,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -624,6 +780,7 @@ mod tests {
             channel_repository,
             channel_video_repository,
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -672,6 +829,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -707,6 +865,7 @@ mod tests {
             channel_repository,
             channel_video_repository,
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -743,6 +902,7 @@ mod tests {
             channel_repository,
             channel_video_repository,
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -780,6 +940,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -817,6 +978,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -854,6 +1016,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -894,6 +1057,7 @@ mod tests {
             channel_repository,
             channel_video_repository,
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -926,6 +1090,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
@@ -952,6 +1117,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response = list_recent(video_searcher, ListRecentVideosQuery { limit: Some(2) }).await;
@@ -978,6 +1144,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(db.connection())),
             Arc::new(SqliteChannelVideoRepository::new(db.connection())),
             video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
         );
 
         let response =
@@ -1296,6 +1463,7 @@ mod tests {
             Arc::new(SqliteChannelRepository::new(unused_connection())),
             Arc::new(SqliteChannelVideoRepository::new(unused_connection())),
             Arc::new(SqliteVideoRepository::new(unused_connection())),
+            Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
         )
     }
 
@@ -1387,6 +1555,9 @@ mod tests {
             watched: false,
             position_seconds: 0,
             synced_at: None,
+            published_at: None,
+            description: None,
+            channel_name: None,
         }
     }
 
@@ -1482,6 +1653,26 @@ mod tests {
             duration_seconds,
             fixed_timestamp(),
         )
+    }
+
+    fn video_metadata() -> VideoMetadata {
+        VideoMetadata::new(
+            "My Video",
+            "A description\nwith two lines",
+            "Some Channel",
+            "Some Channel",
+            published_timestamp(),
+            None,
+            Vec::new(),
+            "vid1",
+            None,
+            "20231114 My Video",
+            fixed_timestamp(),
+        )
+    }
+
+    fn published_timestamp() -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(1_600_000_000, 0).unwrap()
     }
 
     fn progress_request(position_seconds: i64) -> RecordProgressRequest {

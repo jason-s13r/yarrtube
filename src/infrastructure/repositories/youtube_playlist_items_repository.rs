@@ -28,6 +28,21 @@ struct PlaylistItemsResponse {
 #[derive(Debug, Deserialize)]
 struct PlaylistItem {
     snippet: PlaylistItemSnippet,
+    status: Option<PlaylistItemStatus>,
+}
+
+impl PlaylistItem {
+    /// True only for `public` and `unlisted`; private, missing and any
+    /// other status (e.g. deleted videos) are not watchable.
+    fn is_watchable(&self) -> bool {
+        matches!(self.privacy_status(), Some("public" | "unlisted"))
+    }
+
+    fn privacy_status(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .and_then(|status| status.privacy_status.as_deref())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +52,12 @@ struct PlaylistItemSnippet {
     resource_id: ResourceId,
     #[serde(rename = "position")]
     position: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistItemStatus {
+    #[serde(rename = "privacyStatus")]
+    privacy_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,7 +91,7 @@ impl YoutubeApiPlaylistItemsRepository {
     ) -> anyhow::Result<(Vec<YoutubePlaylistItem>, Option<String>)> {
         let client = reqwest::blocking::Client::new();
         let mut query = vec![
-            ("part", "snippet"),
+            ("part", "snippet,status"),
             ("maxResults", "50"),
             ("playlistId", playlist_id),
             ("key", self.api_key.as_str()),
@@ -116,6 +137,7 @@ impl YoutubeApiPlaylistItemsRepository {
         let videos = parsed
             .items
             .into_iter()
+            .filter(PlaylistItem::is_watchable)
             .map(|item| YoutubePlaylistItem {
                 video_id: item.snippet.resource_id.video_id,
                 title: item.snippet.title,
@@ -182,8 +204,8 @@ mod tests {
             .with_status(200)
             .with_body(
                 r#"{"items": [
-                    {"snippet": {"title": "One", "resourceId": {"videoId": "1"}, "position": 0}},
-                    {"snippet": {"title": "Two", "resourceId": {"videoId": "2"}, "position": 1}}
+                    {"snippet": {"title": "One", "resourceId": {"videoId": "1"}, "position": 0}, "status": {"privacyStatus": "public"}},
+                    {"snippet": {"title": "Two", "resourceId": {"videoId": "2"}, "position": 1}, "status": {"privacyStatus": "public"}}
                 ], "nextPageToken": "page2"}"#,
             )
             .create();
@@ -196,7 +218,7 @@ mod tests {
             .with_status(200)
             .with_body(
                 r#"{"items": [
-                    {"snippet": {"title": "Three", "resourceId": {"videoId": "3"}, "position": 2}}
+                    {"snippet": {"title": "Three", "resourceId": {"videoId": "3"}, "position": 2}, "status": {"privacyStatus": "public"}}
                 ]}"#,
             )
             .create();
@@ -227,6 +249,167 @@ mod tests {
                     position: 2,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn it_should_request_snippet_and_status_parts() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("GET", "/")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "part".into(),
+                "snippet,status".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                r#"{"items": [
+                    {"snippet": {"title": "One", "resourceId": {"videoId": "1"}, "position": 0}, "status": {"privacyStatus": "public"}}
+                ]}"#,
+            )
+            .create();
+
+        let repository =
+            YoutubeApiPlaylistItemsRepository::with_base_url("api-key".to_string(), server.url());
+
+        let videos = repository
+            .list_current_videos(&PlaylistId::new("PL1").unwrap())
+            .map_err(|e| e.to_string());
+
+        assert_eq!(
+            videos,
+            Ok(vec![YoutubePlaylistItem {
+                video_id: "1".to_string(),
+                title: "One".to_string(),
+                position: 0,
+            }])
+        );
+    }
+
+    #[test]
+    fn it_should_skip_private_items() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("GET", "/")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(
+                r#"{"items": [
+                    {"snippet": {"title": "Private video", "resourceId": {"videoId": "1"}, "position": 0}, "status": {"privacyStatus": "private"}},
+                    {"snippet": {"title": "Two", "resourceId": {"videoId": "2"}, "position": 1}, "status": {"privacyStatus": "public"}}
+                ]}"#,
+            )
+            .create();
+
+        let repository =
+            YoutubeApiPlaylistItemsRepository::with_base_url("api-key".to_string(), server.url());
+
+        let videos = repository
+            .list_current_videos(&PlaylistId::new("PL1").unwrap())
+            .unwrap();
+
+        assert_eq!(
+            videos,
+            vec![YoutubePlaylistItem {
+                video_id: "2".to_string(),
+                title: "Two".to_string(),
+                position: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn it_should_skip_items_without_a_privacy_status() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("GET", "/")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(
+                r#"{"items": [
+                    {"snippet": {"title": "Deleted video", "resourceId": {"videoId": "1"}, "position": 0}},
+                    {"snippet": {"title": "Two", "resourceId": {"videoId": "2"}, "position": 1}, "status": {"privacyStatus": "public"}}
+                ]}"#,
+            )
+            .create();
+
+        let repository =
+            YoutubeApiPlaylistItemsRepository::with_base_url("api-key".to_string(), server.url());
+
+        let videos = repository
+            .list_current_videos(&PlaylistId::new("PL1").unwrap())
+            .unwrap();
+
+        assert_eq!(
+            videos,
+            vec![YoutubePlaylistItem {
+                video_id: "2".to_string(),
+                title: "Two".to_string(),
+                position: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn it_should_skip_items_with_an_unrecognised_privacy_status() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("GET", "/")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(
+                r#"{"items": [
+                    {"snippet": {"title": "One", "resourceId": {"videoId": "1"}, "position": 0}, "status": {"privacyStatus": "privacyStatusUnspecified"}},
+                    {"snippet": {"title": "Two", "resourceId": {"videoId": "2"}, "position": 1}, "status": {"privacyStatus": "public"}}
+                ]}"#,
+            )
+            .create();
+
+        let repository =
+            YoutubeApiPlaylistItemsRepository::with_base_url("api-key".to_string(), server.url());
+
+        let videos = repository
+            .list_current_videos(&PlaylistId::new("PL1").unwrap())
+            .unwrap();
+
+        assert_eq!(
+            videos,
+            vec![YoutubePlaylistItem {
+                video_id: "2".to_string(),
+                title: "Two".to_string(),
+                position: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn it_should_keep_unlisted_items() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("GET", "/")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(
+                r#"{"items": [
+                    {"snippet": {"title": "Unlisted", "resourceId": {"videoId": "1"}, "position": 3}, "status": {"privacyStatus": "unlisted"}}
+                ]}"#,
+            )
+            .create();
+
+        let repository =
+            YoutubeApiPlaylistItemsRepository::with_base_url("api-key".to_string(), server.url());
+
+        let videos = repository
+            .list_current_videos(&PlaylistId::new("PL1").unwrap())
+            .unwrap();
+
+        assert_eq!(
+            videos,
+            vec![YoutubePlaylistItem {
+                video_id: "1".to_string(),
+                title: "Unlisted".to_string(),
+                position: 3,
+            }]
         );
     }
 

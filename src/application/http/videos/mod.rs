@@ -722,6 +722,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_include_channel_name_in_recent_videos() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let channel_video_repository = Arc::new(SqliteChannelVideoRepository::new(db.connection()));
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.connection()));
+        channel_repository
+            .insert(&channel("@somechannel", None))
+            .unwrap();
+        save_channel_video(
+            video_repository.as_ref(),
+            channel_video_repository.as_ref(),
+            "@somechannel",
+            &downloaded_video("vid1", "My Video", None, 100),
+            0,
+        );
+        let video_searcher = VideoSearcher::new(
+            Arc::new(SqlitePlaylistRepository::new(db.connection())),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection())),
+            channel_repository,
+            channel_video_repository,
+            video_repository,
+        );
+
+        let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
+
+        assert_eq!(
+            response,
+            Ok(vec![recent_video_response(
+                "vid1",
+                "My Video",
+                RecentVideoSourceResponse {
+                    name: "Some Channel".to_string(),
+                    ..channel_source(None)
+                }
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_include_playlist_name_in_recent_videos() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            "PL1",
+            &downloaded_video("vid1", "My Video", None, 100),
+        );
+        let video_searcher = VideoSearcher::new(
+            playlist_repository,
+            playlist_video_repository,
+            Arc::new(SqliteChannelRepository::new(db.connection())),
+            Arc::new(SqliteChannelVideoRepository::new(db.connection())),
+            video_repository,
+        );
+
+        let response = list_recent(video_searcher, ListRecentVideosQuery { limit: None }).await;
+
+        assert_eq!(
+            response,
+            Ok(vec![recent_video_response(
+                "vid1",
+                "My Video",
+                RecentVideoSourceResponse {
+                    name: "My Playlist".to_string(),
+                    ..playlist_source()
+                }
+            )])
+        );
+    }
+
+    #[tokio::test]
     async fn it_should_include_whether_recent_videos_were_watched() {
         let db = TestDatabase::new();
         let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
@@ -1333,6 +1409,7 @@ mod tests {
         RecentVideoSourceResponse {
             kind: "playlist".to_string(),
             id: "PL1".to_string(),
+            name: "My Playlist".to_string(),
             path: "music".to_string(),
             avatar_filename: None,
         }
@@ -1342,6 +1419,7 @@ mod tests {
         RecentVideoSourceResponse {
             kind: "channel".to_string(),
             id: "@somechannel".to_string(),
+            name: "Some Channel".to_string(),
             path: "creators/somechannel".to_string(),
             avatar_filename: avatar_filename.map(str::to_string),
         }

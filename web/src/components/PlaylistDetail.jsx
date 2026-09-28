@@ -1,34 +1,28 @@
 import { useState } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { TriangleAlert } from 'lucide-react'
 import { usePolling } from '../usePolling'
-import { fetchPlaylists, fetchVideos, videoMediaUrl } from '../api'
+import {
+  fetchPlaylists,
+  fetchVideos,
+  reconcilePlaylist,
+  deletePlaylist,
+  videoMediaUrl,
+} from '../api'
 import { formatDuration } from '../formatDuration'
 import { useWatchProgress } from '../useWatchProgress'
 import { Thumbnail } from './Thumbnail'
 import { WatchedTick } from './WatchedTick'
 import { Beacon } from './Beacon'
-import { Badge } from '@/components/ui/badge'
+import { VideoPlayer } from './VideoPlayer'
+import { VideoDetail } from './VideoDetail'
+import { DetailHeader } from './DetailHeader'
 import { cn } from '@/lib/utils'
 
 const STATUS_MESSAGES = {
   PENDING: 'This video is pending.',
   ERRORED_RETRYING: 'This video failed to download and will be retried.',
   ERRORED: 'This video failed to download.',
-}
-
-const STATUS_LABELS = {
-  DOWNLOADED: 'Downloaded',
-  IN_PROGRESS: 'Downloading',
-  PENDING: 'Pending',
-  ERRORED_RETRYING: 'Retrying',
-  ERRORED: 'Errored',
-}
-
-const QUALITY_LABELS = {
-  high: 'High quality',
-  mid: 'Medium quality',
-  low: 'Low quality',
 }
 
 function VideoStatusIndicator({ status }) {
@@ -52,39 +46,9 @@ function VideoStatusIndicator({ status }) {
   )
 }
 
-function VideoDetail({ playlist, video }) {
-  const path = video.filename ? `${playlist.path}/${video.filename}` : playlist.path
-
-  return (
-    <div className="rounded-lg border border-border p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <h3 className="min-w-0 flex-1 font-heading text-xl font-semibold text-foreground">
-          {video.title}
-        </h3>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Badge variant={video.status === 'DOWNLOADED' ? 'secondary' : 'outline'}>
-            {STATUS_LABELS[video.status] ?? video.status}
-          </Badge>
-          <Badge variant="outline">{QUALITY_LABELS[video.quality] ?? '—'}</Badge>
-        </div>
-      </div>
-      <p className="mt-2 text-xs break-words text-muted-foreground">{path}</p>
-      <div className="mt-3 flex items-center gap-4">
-        <a
-          className="text-sm text-primary underline-offset-4 hover:underline"
-          href={`https://www.youtube.com/watch?v=${encodeURIComponent(video.id)}`}
-          target="_blank"
-          rel="noopener"
-        >
-          Open on YouTube
-        </a>
-      </div>
-    </div>
-  )
-}
-
 export function PlaylistDetail() {
   const { id } = useParams()
+  const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const { data: playlists, error: playlistsError } = usePolling(fetchPlaylists, [])
   const playlist = playlists?.find((item) => item.id === id) ?? null
@@ -117,41 +81,35 @@ export function PlaylistDetail() {
   }
 
   return (
-    <div className="flex h-full min-h-[480px] flex-col">
-      <div className="grid min-h-0 flex-1 grid-cols-1 items-start gap-6 overflow-hidden md:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="flex min-w-0 flex-col gap-4 h-full overflow-hidden overflow-y-auto">
-          <div className="flex min-h-80 items-center justify-center rounded-lg bg-secondary/60">
-            {selectedVideo?.status === 'DOWNLOADED' && selectedVideo.filename ? (
-              // eslint-disable-next-line jsx-a11y/media-has-caption
-              <video
-                ref={setVideoElement}
-                controls
-                autoPlay={autoplay}
-                className="block max-h-[70vh] w-full rounded-lg"
-                src={videoMediaUrl(playlist.path, selectedVideo.filename)}
-                poster={
-                  selectedVideo.thumbnail_filename
-                    ? videoMediaUrl(playlist.path, selectedVideo.thumbnail_filename)
-                    : undefined
-                }
-              />
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                {selectedVideo
-                  ? 'This video has not been downloaded yet.'
-                  : 'Select a video to play it.'}
-              </p>
-            )}
-          </div>
+    <div className="flex flex-col md:h-full md:min-h-[480px]">
+      <DetailHeader
+        name={playlist.name}
+        videos={videos}
+        unwatchedCount={playlist.unwatched_count}
+        onSync={() => reconcilePlaylist(id)}
+        onDelete={async () => {
+          await deletePlaylist(id)
+          navigate('/')
+        }}
+        deleteDescription="This removes the playlist from tracking, along with its video records and downloaded files."
+      />
+      <div className="grid grid-cols-1 gap-4 md:min-h-0 md:flex-1 md:grid-cols-[minmax(0,1fr)_360px] md:items-start md:gap-6 md:overflow-hidden">
+        <div className="contents md:flex md:h-full md:min-w-0 md:flex-col md:gap-4 md:overflow-y-auto">
+          <VideoPlayer
+            basePath={playlist.path}
+            video={selectedVideo}
+            autoplay={autoplay}
+            onVideoElement={setVideoElement}
+          />
 
           {selectedVideo ? (
-            <VideoDetail playlist={playlist} video={selectedVideo} />
+            <VideoDetail basePath={playlist.path} video={selectedVideo} />
           ) : (
             <p className="text-sm text-muted-foreground">No video selected.</p>
           )}
         </div>
 
-        <div className="min-h-0 h-full overflow-y-auto">
+        <div className="md:h-full md:min-h-0 md:overflow-y-auto">
           {error && <p className="text-sm text-destructive">Failed to load videos: {error.message}</p>}
           {!error && !videos && <p className="text-sm text-muted-foreground">Loading videos…</p>}
           {!error && videos && videos.length === 0 && (

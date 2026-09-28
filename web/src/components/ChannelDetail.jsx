@@ -1,10 +1,12 @@
 import { useState } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
-import { CheckCheck, TriangleAlert } from 'lucide-react'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { TriangleAlert } from 'lucide-react'
 import { usePolling } from '../usePolling'
 import {
   fetchChannels,
   fetchChannelVideos,
+  reconcileChannel,
+  deleteChannel,
   markChannelWatched,
   videoMediaUrl,
   avatarMediaUrl,
@@ -14,28 +16,15 @@ import { useWatchProgress } from '../useWatchProgress'
 import { Thumbnail } from './Thumbnail'
 import { WatchedTick } from './WatchedTick'
 import { Beacon } from './Beacon'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { VideoPlayer } from './VideoPlayer'
+import { VideoDetail } from './VideoDetail'
+import { DetailHeader } from './DetailHeader'
 import { cn } from '@/lib/utils'
 
 const STATUS_MESSAGES = {
   PENDING: 'This video is pending.',
   ERRORED_RETRYING: 'This video failed to download and will be retried.',
   ERRORED: 'This video failed to download.',
-}
-
-const STATUS_LABELS = {
-  DOWNLOADED: 'Downloaded',
-  IN_PROGRESS: 'Downloading',
-  PENDING: 'Pending',
-  ERRORED_RETRYING: 'Retrying',
-  ERRORED: 'Errored',
-}
-
-const QUALITY_LABELS = {
-  high: 'High quality',
-  mid: 'Medium quality',
-  low: 'Low quality',
 }
 
 function VideoStatusIndicator({ status }) {
@@ -59,50 +48,15 @@ function VideoStatusIndicator({ status }) {
   )
 }
 
-function VideoDetail({ channel, video }) {
-  const path = video.filename ? `${channel.path}/${video.filename}` : channel.path
-
-  return (
-    <div className="rounded-lg border border-border p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-1 items-start gap-2.5">
-          <Thumbnail
-            src={channel.avatar_filename ? avatarMediaUrl(channel.avatar_filename) : null}
-            className="mt-0.5 size-8 shrink-0 rounded-full object-cover"
-          />
-          <h3 className="min-w-0 flex-1 font-heading text-xl font-semibold text-foreground">
-            {video.title}
-          </h3>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Badge variant={video.status === 'DOWNLOADED' ? 'secondary' : 'outline'}>
-            {STATUS_LABELS[video.status] ?? video.status}
-          </Badge>
-          <Badge variant="outline">{QUALITY_LABELS[video.quality] ?? '—'}</Badge>
-        </div>
-      </div>
-      <p className="mt-2 text-xs break-words text-muted-foreground">{path}</p>
-      <a
-        className="mt-3 inline-block text-sm text-primary underline-offset-4 hover:underline"
-        href={`https://www.youtube.com/watch?v=${encodeURIComponent(video.id)}`}
-        target="_blank"
-        rel="noopener"
-      >
-        Open on YouTube
-      </a>
-    </div>
-  )
-}
-
 export function ChannelDetail() {
   const { id } = useParams()
+  const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const { data: channels, error: channelsError } = usePolling(fetchChannels, [])
   const channel = channels?.find((item) => item.id === id) ?? null
 
   const { data: videos, error } = usePolling(() => fetchChannelVideos(id), [id])
   const [manualSelectionId, setManualSelectionId] = useState(null)
-  const [markingWatched, setMarkingWatched] = useState(false)
   const manualSelection = manualSelectionId
     ? (videos?.find((video) => video.id === manualSelectionId) ?? null)
     : null
@@ -129,61 +83,38 @@ export function ChannelDetail() {
   }
 
   return (
-    <div className="flex h-full min-h-[480px] flex-col">
-      <div className="grid min-h-0 flex-1 grid-cols-1 items-start gap-6 overflow-hidden md:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="flex min-w-0 flex-col gap-4 h-full overflow-hidden overflow-y-auto">
-          <div className="flex min-h-80 items-center justify-center rounded-lg bg-secondary/60">
-            {selectedVideo?.status === 'DOWNLOADED' && selectedVideo.filename ? (
-              // eslint-disable-next-line jsx-a11y/media-has-caption
-              <video
-                ref={setVideoElement}
-                controls
-                autoPlay={autoplay}
-                className="block max-h-[70vh] w-full rounded-lg"
-                src={videoMediaUrl(channel.path, selectedVideo.filename)}
-                poster={
-                  selectedVideo.thumbnail_filename
-                    ? videoMediaUrl(channel.path, selectedVideo.thumbnail_filename)
-                    : undefined
-                }
-              />
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                {selectedVideo
-                  ? 'This video has not been downloaded yet.'
-                  : 'Select a video to play it.'}
-              </p>
-            )}
-          </div>
+    <div className="flex flex-col md:h-full md:min-h-[480px]">
+      <DetailHeader
+        name={channel.name}
+        showAvatar
+        avatarSrc={channel.avatar_filename ? avatarMediaUrl(channel.avatar_filename) : null}
+        videos={videos}
+        unwatchedCount={channel.unwatched_count}
+        onSync={() => reconcileChannel(id)}
+        onMarkWatched={() => markChannelWatched(id)}
+        onDelete={async () => {
+          await deleteChannel(id)
+          navigate('/')
+        }}
+        deleteDescription="This removes the channel from tracking."
+      />
+      <div className="grid grid-cols-1 gap-4 md:min-h-0 md:flex-1 md:grid-cols-[minmax(0,1fr)_360px] md:items-start md:gap-6 md:overflow-hidden">
+        <div className="contents md:flex md:h-full md:min-w-0 md:flex-col md:gap-4 md:overflow-y-auto">
+          <VideoPlayer
+            basePath={channel.path}
+            video={selectedVideo}
+            autoplay={autoplay}
+            onVideoElement={setVideoElement}
+          />
 
           {selectedVideo ? (
-            <VideoDetail channel={channel} video={selectedVideo} />
+            <VideoDetail basePath={channel.path} video={selectedVideo} channel={channel} />
           ) : (
             <p className="text-sm text-muted-foreground">No video selected.</p>
           )}
         </div>
 
-        <div className="min-h-0 h-full overflow-y-auto">
-          <div className="mb-2 flex justify-end">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={markingWatched}
-              onClick={async () => {
-                setMarkingWatched(true)
-                try {
-                  await markChannelWatched(id)
-                } catch (err) {
-                  window.alert(`Failed to mark "${channel.name}" watched: ${err.message}`)
-                } finally {
-                  setMarkingWatched(false)
-                }
-              }}
-            >
-              <CheckCheck />
-              Mark all watched
-            </Button>
-          </div>
+        <div className="md:h-full md:min-h-0 md:overflow-y-auto">
           {error && <p className="text-sm text-destructive">Failed to load videos: {error.message}</p>}
           {!error && !videos && <p className="text-sm text-muted-foreground">Loading videos…</p>}
           {!error && videos && videos.length === 0 && (

@@ -1,10 +1,14 @@
 import { useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { TriangleAlert } from 'lucide-react'
-import { usePolling } from '../usePolling'
 import {
-  fetchPlaylists,
-  fetchVideos,
+  queryKeys,
+  useLibraryAction,
+  usePlaylists,
+  usePlaylistVideos,
+  useRemoveQuery,
+} from '../queries'
+import {
   reconcilePlaylist,
   deletePlaylist,
   videoMediaUrl,
@@ -50,10 +54,12 @@ export function PlaylistDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const { data: playlists, error: playlistsError } = usePolling(fetchPlaylists, [])
+  const { data: playlists, error: playlistsError } = usePlaylists()
+  const refreshing = useLibraryAction()
+  const removeQuery = useRemoveQuery()
   const playlist = playlists?.find((item) => item.id === id) ?? null
 
-  const { data: videos, error } = usePolling(() => fetchVideos(id), [id])
+  const { data: videos, error } = usePlaylistVideos(id)
   const [manualSelectionId, setManualSelectionId] = useState(null)
   const manualSelection = manualSelectionId
     ? (videos?.find((video) => video.id === manualSelectionId) ?? null)
@@ -86,11 +92,12 @@ export function PlaylistDetail() {
         name={playlist.name}
         videos={videos}
         unwatchedCount={playlist.unwatched_count}
-        onSync={() => reconcilePlaylist(id)}
-        onDelete={async () => {
+        onSync={refreshing(() => reconcilePlaylist(id))}
+        onDelete={refreshing(async () => {
           await deletePlaylist(id)
+          removeQuery(queryKeys.playlistVideos(id))
           navigate('/')
-        }}
+        })}
         deleteDescription="This removes the playlist from tracking, along with its video records and downloaded files."
       />
       <div className="grid grid-cols-1 gap-4 md:min-h-0 md:flex-1 md:grid-cols-[minmax(0,1fr)_360px] md:items-start md:gap-6 md:overflow-hidden">

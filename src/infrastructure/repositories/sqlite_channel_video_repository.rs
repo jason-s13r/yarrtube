@@ -19,6 +19,8 @@ pub trait ChannelVideoRepository: Send + Sync {
     fn find_by_video(&self, video_id: &VideoRecordId) -> anyhow::Result<Option<ChannelVideo>>;
     /// Ordered by recency position (`0` = most recent).
     fn list_for_channel(&self, channel_id: &ChannelHandle) -> anyhow::Result<Vec<ChannelVideo>>;
+    /// Every stored channel video, across all channels.
+    fn list(&self) -> anyhow::Result<Vec<ChannelVideo>>;
     fn delete(&self, channel_id: &ChannelHandle, youtube_video_id: &VideoId) -> anyhow::Result<()>;
     fn delete_all_for_channel(&self, channel_id: &ChannelHandle) -> anyhow::Result<()>;
 }
@@ -135,13 +137,30 @@ impl ChannelVideoRepository for SqliteChannelVideoRepository {
             })
             .context("failed to list channel videos")?;
 
-        rows.map(|row| {
-            let columns = row
-                .inspect_err(|e| tracing::error!(error = %e, "failed to read channel video row"))
-                .context("failed to read channel video row")?;
-            columns_to_channel_video(columns)
-        })
-        .collect()
+        rows_to_channel_videos(rows)
+    }
+
+    fn list(&self) -> anyhow::Result<Vec<ChannelVideo>> {
+        let conn = self
+            .conn
+            .lock()
+            .inspect_err(|_| tracing::error!("database lock poisoned"))
+            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, channel_id, video_id, position, created_at
+                 FROM channel_videos ORDER BY id ASC",
+            )
+            .inspect_err(
+                |e| tracing::error!(error = %e, "failed to prepare list-all-channel-videos query"),
+            )
+            .context("failed to prepare list-all-channel-videos query")?;
+        let rows = stmt
+            .query_map([], row_to_columns)
+            .inspect_err(|e| tracing::error!(error = %e, "failed to list all channel videos"))
+            .context("failed to list all channel videos")?;
+
+        rows_to_channel_videos(rows)
     }
 
     fn delete(&self, channel_id: &ChannelHandle, youtube_video_id: &VideoId) -> anyhow::Result<()> {
@@ -192,6 +211,18 @@ fn row_to_columns(row: &rusqlite::Row) -> rusqlite::Result<Columns> {
         row.get::<_, i64>(3)?,
         row.get::<_, String>(4)?,
     ))
+}
+
+fn rows_to_channel_videos(
+    rows: impl Iterator<Item = rusqlite::Result<Columns>>,
+) -> anyhow::Result<Vec<ChannelVideo>> {
+    rows.map(|row| {
+        let columns = row
+            .inspect_err(|e| tracing::error!(error = %e, "failed to read channel video row"))
+            .context("failed to read channel video row")?;
+        columns_to_channel_video(columns)
+    })
+    .collect()
 }
 
 fn columns_to_channel_video(columns: Columns) -> anyhow::Result<ChannelVideo> {
@@ -291,6 +322,47 @@ mod tests {
                 .map(|cv| cv.video_id.clone())
                 .collect::<Vec<_>>(),
             vec![newest.id, oldest.id]
+        );
+    }
+
+    #[test]
+    fn it_should_list_every_channel_video() {
+        let repo = repo();
+        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let one = seed_video(&repo, "yt1", "One");
+        let two = seed_video(&repo, "yt2", "Two");
+        let three = seed_video(&repo, "yt3", "Three");
+        let other_channel_id = ChannelHandle::new("@other").unwrap();
+        repo.save(&ChannelVideo::create(channel_id(), one.id.clone(), 0, now))
+            .unwrap();
+        repo.save(&ChannelVideo::create(channel_id(), two.id.clone(), 1, now))
+            .unwrap();
+        repo.save(&ChannelVideo::create(
+            other_channel_id.clone(),
+            three.id.clone(),
+            0,
+            now,
+        ))
+        .unwrap();
+
+        let channel_videos = repo.list().unwrap();
+
+        assert_eq!(
+            channel_videos,
+            vec![
+                ChannelVideo {
+                    id: 1,
+                    ..ChannelVideo::create(channel_id(), one.id, 0, now)
+                },
+                ChannelVideo {
+                    id: 2,
+                    ..ChannelVideo::create(channel_id(), two.id, 1, now)
+                },
+                ChannelVideo {
+                    id: 3,
+                    ..ChannelVideo::create(other_channel_id, three.id, 0, now)
+                },
+            ]
         );
     }
 

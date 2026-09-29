@@ -1,10 +1,14 @@
 import { useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { TriangleAlert } from 'lucide-react'
-import { usePolling } from '../usePolling'
 import {
-  fetchChannels,
-  fetchChannelVideos,
+  queryKeys,
+  useChannels,
+  useChannelVideos,
+  useLibraryAction,
+  useRemoveQuery,
+} from '../queries'
+import {
   reconcileChannel,
   deleteChannel,
   markChannelWatched,
@@ -52,10 +56,12 @@ export function ChannelDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const { data: channels, error: channelsError } = usePolling(fetchChannels, [])
+  const { data: channels, error: channelsError } = useChannels()
+  const refreshing = useLibraryAction()
+  const removeQuery = useRemoveQuery()
   const channel = channels?.find((item) => item.id === id) ?? null
 
-  const { data: videos, error } = usePolling(() => fetchChannelVideos(id), [id])
+  const { data: videos, error } = useChannelVideos(id)
   const [manualSelectionId, setManualSelectionId] = useState(null)
   const manualSelection = manualSelectionId
     ? (videos?.find((video) => video.id === manualSelectionId) ?? null)
@@ -90,12 +96,13 @@ export function ChannelDetail() {
         avatarSrc={channel.avatar_filename ? avatarMediaUrl(channel.avatar_filename) : null}
         videos={videos}
         unwatchedCount={channel.unwatched_count}
-        onSync={() => reconcileChannel(id)}
-        onMarkWatched={() => markChannelWatched(id)}
-        onDelete={async () => {
+        onSync={refreshing(() => reconcileChannel(id))}
+        onMarkWatched={refreshing(() => markChannelWatched(id))}
+        onDelete={refreshing(async () => {
           await deleteChannel(id)
+          removeQuery(queryKeys.channelVideos(id))
           navigate('/')
-        }}
+        })}
         deleteDescription="This removes the channel from tracking."
       />
       <div className="grid grid-cols-1 gap-4 md:min-h-0 md:flex-1 md:grid-cols-[minmax(0,1fr)_360px] md:items-start md:gap-6 md:overflow-hidden">

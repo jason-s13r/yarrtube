@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { beaconVideoProgress, recordVideoProgress } from './api'
+import { queryKeys } from './queries'
 
 const REPORT_INTERVAL_MS = 15000
 
@@ -11,8 +13,13 @@ const REPORT_INTERVAL_MS = 15000
  * hidden or closed. Takes the element itself (from a callback ref) rather
  * than a ref object, so it re-attaches whenever the element mounts later
  * than the video is selected (e.g. while the view is still loading).
+ * When a non-beacon report comes back with a watched state different from
+ * the last known one, it refetches the channel list, so unwatched badges
+ * follow a video crossing the watched threshold without refetching on every
+ * report.
  */
 export function useWatchProgress(videoElement, video) {
+  const queryClient = useQueryClient()
   const latestVideo = useRef(video)
   const videoId = video?.id ?? null
   const playable = video?.status === 'DOWNLOADED' && Boolean(video?.filename)
@@ -29,6 +36,7 @@ export function useWatchProgress(videoElement, video) {
 
     let lastReportAt = Date.now()
     let lastReportedPosition = null
+    let lastWatched = Boolean(latestVideo.current?.watched)
     // Kept up to date while playing, since by cleanup time the element may
     // already have switched to another video's source.
     let progress = null
@@ -43,13 +51,24 @@ export function useWatchProgress(videoElement, video) {
       }
     }
 
-    const report = (send = recordVideoProgress) => {
+    const report = ({ beacon = false } = {}) => {
       if (!progress || progress.position_seconds === lastReportedPosition) {
         return
       }
       lastReportedPosition = progress.position_seconds
       lastReportAt = Date.now()
-      Promise.resolve(send(videoId, progress)).catch(() => {})
+      if (beacon) {
+        beaconVideoProgress(videoId, progress)
+        return
+      }
+      recordVideoProgress(videoId, progress)
+        .then(({ watched }) => {
+          if (watched !== lastWatched) {
+            lastWatched = watched
+            queryClient.invalidateQueries({ queryKey: queryKeys.channels, exact: true })
+          }
+        })
+        .catch(() => {})
     }
 
     const resume = () => {
@@ -73,7 +92,7 @@ export function useWatchProgress(videoElement, video) {
 
     const onPageHide = () => {
       capture()
-      report(beaconVideoProgress)
+      report({ beacon: true })
     }
 
     if (element.readyState >= HTMLMediaElement.HAVE_METADATA) {
@@ -93,7 +112,7 @@ export function useWatchProgress(videoElement, video) {
       window.removeEventListener('pagehide', onPageHide)
       report()
     }
-  }, [videoElement, videoId, playable])
+  }, [videoElement, videoId, playable, queryClient])
 }
 
 function seekTo(element, seconds) {

@@ -1,6 +1,6 @@
 use crate::domain::channel::ChannelHandle;
 use crate::domain::video::{
-    PlaybackPosition, UpdateWatchStateError, Video, VideoDuration, VideoId, VideoStatus,
+    PlaybackPosition, UpdateWatchStateError, Video, VideoDuration, VideoId,
 };
 use crate::infrastructure::repositories::sqlite_channel_repository::ChannelRepository;
 use crate::infrastructure::repositories::sqlite_channel_video_repository::ChannelVideoRepository;
@@ -38,13 +38,15 @@ impl VideoWatchStateUpdater {
 }
 
 pub trait VideoWatchStateUpdaterApi: Send + Sync {
-    /// Applies `Video::update_watch_state` to every stored copy of `youtube_id`.
+    /// Applies `Video::update_watch_state` to every stored copy of
+    /// `youtube_id`. Returns whether the video is watched once the report is
+    /// applied.
     fn update(
         &self,
         youtube_id: &VideoId,
         position: PlaybackPosition,
         reported_duration: Option<VideoDuration>,
-    ) -> Result<(), UpdateWatchStateError>;
+    ) -> Result<bool, UpdateWatchStateError>;
     /// Marks every `Downloaded` video of the channel watched, with every
     /// stored copy of each; pending/in-flight videos are left unchanged.
     fn mark_channel_watched(&self, channel_id: &ChannelHandle)
@@ -57,13 +59,17 @@ impl VideoWatchStateUpdaterApi for VideoWatchStateUpdater {
         youtube_id: &VideoId,
         position: PlaybackPosition,
         reported_duration: Option<VideoDuration>,
-    ) -> Result<(), UpdateWatchStateError> {
+    ) -> Result<bool, UpdateWatchStateError> {
         let copies = self.find_copies(youtube_id)?;
         let now = self.clock.now();
         copies
             .into_iter()
             .map(|video| video.update_watch_state(position, reported_duration, now))
-            .try_for_each(|video| self.video_repository.update(&video))
+            .try_fold(false, |watched, video| {
+                self.video_repository
+                    .update(&video)
+                    .map(|()| watched || video.is_watched())
+            })
             .map_err(UpdateWatchStateError::Repository)
     }
 
@@ -100,7 +106,7 @@ impl VideoWatchStateUpdater {
         Ok(self
             .channel_videos(channel_id)?
             .into_iter()
-            .filter(|video| video.status == VideoStatus::Downloaded && !video.is_watched())
+            .filter(|video| video.is_downloaded_and_unwatched())
             .map(|video| video.youtube_id)
             .collect())
     }

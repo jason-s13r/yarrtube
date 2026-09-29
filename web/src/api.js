@@ -1,7 +1,9 @@
+/** GETs `path` under `/api`; rejects with the server's error message when it gives one. */
 async function request(path) {
   const response = await fetch(`/api${path}`)
   if (!response.ok) {
-    throw new Error(`request to ${path} failed with status ${response.status}`)
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.error ?? `request to ${path} failed with status ${response.status}`)
   }
   return response.json()
 }
@@ -43,11 +45,11 @@ export function avatarMediaUrl(filename) {
   return `/avatars/${encodeURIComponent(filename)}`
 }
 
-export async function createPlaylist({ playlist, name, path, quality }) {
+export async function createPlaylist({ playlist, path, quality }) {
   const response = await fetch('/api/playlists', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ playlist, name, path, quality }),
+    body: JSON.stringify({ playlist, path, quality }),
   })
   if (!response.ok) {
     const body = await response.json().catch(() => null)
@@ -56,6 +58,18 @@ export async function createPlaylist({ playlist, name, path, quality }) {
     )
   }
   return response.json()
+}
+
+/**
+ * Looks a playlist ID or URL up on YouTube without tracking it. Resolves to
+ * `{ id, title, video_count }`; rejects with the server's error message.
+ */
+export function previewPlaylist(playlist) {
+  return request(`/playlists/preview?playlist=${encodeURIComponent(playlist)}`)
+}
+
+export function previewChannel(channel) {
+  return request(`/channels/preview?channel=${encodeURIComponent(channel)}`)
 }
 
 export async function deletePlaylist(id) {

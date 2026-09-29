@@ -1,19 +1,24 @@
 import { test, expect } from '@playwright/test'
-import { openAddDialog, submitPlaylist, fillPlaylist } from '../helpers/addDialog.js'
+import {
+  openAddPlaylistDialog,
+  submitPlaylist,
+  fillPlaylist,
+  destinationNotice,
+} from '../helpers/addDialog.js'
 import { waitForVideoStatus, assertVideoPlays } from '../helpers/video.js'
 import { syncItem, deleteItem, sectionRows } from '../helpers/sidebar.js'
 
 const PLAYLIST_ID = process.env.SMOKE_PLAYLIST_ID
-const PLAYLIST_NAME = process.env.SMOKE_PLAYLIST_NAME ?? 'yarrtube smoke tests'
+const PLAYLIST_NAME = process.env.SMOKE_PLAYLIST_NAME ?? 'test'
 
 test('playlist lifecycle: add, download, play, sync, duplicate error, delete', async ({ page }) => {
   test.skip(!PLAYLIST_ID, 'SMOKE_PLAYLIST_ID is not set')
 
   await page.goto('/')
 
-  // Add via the Add dialog and confirm it lands in the sidebar.
-  await openAddDialog(page)
-  await submitPlaylist(page, { url: PLAYLIST_ID, name: PLAYLIST_NAME })
+  // Add via the sidebar's "Add playlist" and confirm it lands in the sidebar.
+  await openAddPlaylistDialog(page)
+  await submitPlaylist(page, { url: PLAYLIST_ID })
   const sidebarLink = page.locator('h3:text-is("Playlists") ~ ul').getByRole('link', { name: PLAYLIST_NAME })
   await expect(sidebarLink).toBeVisible()
 
@@ -81,16 +86,12 @@ test('playlist lifecycle: add, download, play, sync, duplicate error, delete', a
   // Sync from the sidebar completes without an error dialog/alert.
   await syncItem(page, { section: 'Playlists', name: PLAYLIST_NAME })
 
-  // The same name auto-derives the same folder under the same default
-  // parent as the already-tracked playlist. That conflict is now caught in
-  // the dialog, before submission, so the preview reports it and the submit
-  // button stays disabled — there is no rejected request to recover from.
-  await openAddDialog(page)
-  const dialog = await fillPlaylist(page, {
-    url: 'not-a-real-playlist-id-path-conflict-check',
-    name: PLAYLIST_NAME,
-  })
-  await expect(dialog.getByText(/Already used by/)).toBeVisible()
+  // Adding the same playlist again is caught in the dialog, before
+  // submission: the notice names what it was added as and the submit button
+  // stays disabled.
+  await openAddPlaylistDialog(page)
+  const dialog = await fillPlaylist(page, { url: PLAYLIST_ID })
+  await expect(destinationNotice(dialog)).toHaveText(`Already added as “${PLAYLIST_NAME}”`)
   await expect(dialog.getByRole('button', { name: /^Create Playlist/ })).toBeDisabled()
   await dialog.getByRole('button', { name: 'Close' }).click()
 

@@ -1,10 +1,12 @@
 pub mod channel_creator;
 pub mod channel_deleter;
+pub mod channel_previewer;
 pub mod channel_video_reconciler;
 pub mod channel_view_searcher;
 pub mod directory_searcher;
 pub mod playlist_creator;
 pub mod playlist_deleter;
+pub mod playlist_previewer;
 pub mod playlist_searcher;
 pub mod playlist_video_reconciler;
 pub mod task_view_searcher;
@@ -16,11 +18,13 @@ pub mod video_watch_state_updater;
 
 pub use channel_creator::{ChannelCreator, ChannelCreatorApi, CreateChannelOutcome};
 pub use channel_deleter::{ChannelDeleter, ChannelDeleterApi};
+pub use channel_previewer::{ChannelPreviewer, ChannelPreviewerApi};
 pub use channel_video_reconciler::{ChannelVideoReconciler, ChannelVideoReconcilerApi};
 pub use channel_view_searcher::{ChannelViewSearcher, ChannelViewSearcherApi};
 pub use directory_searcher::{DirectorySearcher, DirectorySearcherApi};
 pub use playlist_creator::{CreatePlaylistOutcome, PlaylistCreator, PlaylistCreatorApi};
 pub use playlist_deleter::{PlaylistDeleter, PlaylistDeleterApi};
+pub use playlist_previewer::{PlaylistPreviewer, PlaylistPreviewerApi};
 pub use playlist_searcher::{PlaylistSearcher, PlaylistSearcherApi};
 pub use playlist_video_reconciler::{PlaylistVideoReconciler, PlaylistVideoReconcilerApi};
 pub use task_view_searcher::{TaskViewSearcher, TaskViewSearcherApi};

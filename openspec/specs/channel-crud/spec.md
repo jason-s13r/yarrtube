@@ -9,6 +9,8 @@ The system SHALL provide an HTTP endpoint that creates a channel given a `channe
 
 The stored ID is the handle, not the immutable channel ID, so the HTTP surface stays human-readable (e.g. `DELETE /channels/@somechannel`). The immutable ID is stored alongside it because a handle can be changed later by the channel's owner, while the immutable ID cannot.
 
+When deciding whether a channel already exists in storage, the system SHALL compare handles ignoring case, since YouTube treats handles that differ only in case (`@Name`, `@name`) as the same channel.
+
 The storage path identifies where the channel's videos are saved, relative to the configured videos root directory, and may contain multiple `/`-separated segments to express nested subdirectories (e.g. `creators/somechannel`), the same as a playlist's storage path.
 
 #### Scenario: Successful creation from a bare handle
@@ -22,6 +24,10 @@ The storage path identifies where the channel's videos are saved, relative to th
 #### Scenario: Duplicate channel handle
 - **WHEN** a request supplies a `channel` value (bare handle or URL) whose handle already exists in storage
 - **THEN** the system accepts the request but makes no change because the endpoint is idempotent, and returns the existing channel record
+
+#### Scenario: Duplicate channel handle in a different case
+- **WHEN** a request supplies a `channel` value whose handle differs only in case from one already in storage (e.g. `@SomeChannel` when `@somechannel` is stored)
+- **THEN** the system makes no change and returns the existing channel record, with its stored handle
 
 #### Scenario: Duplicate channel handle with a different quality
 - **WHEN** a request supplies a `channel` value whose handle already exists in storage, with a quality value different from the stored record's
@@ -74,6 +80,35 @@ The storage path identifies where the channel's videos are saved, relative to th
 #### Scenario: Missing or invalid path
 - **WHEN** a request omits path, supplies an empty path, or supplies a path that is absolute, contains a `..` segment, or contains an empty segment (e.g. leading/trailing/doubled `/`)
 - **THEN** the system rejects the request without persisting anything and without checking YouTube and returns a bad request with a meaningful error description
+
+### Requirement: Preview a YouTube Channel
+The system SHALL provide an HTTP endpoint that, given a `channel` value that is either a YouTube channel handle or a YouTube channel URL carrying a handle, looks the channel up on YouTube and returns its handle, its YouTube title, and the URL of its avatar image as YouTube reports it (or no avatar when YouTube reports none), without persisting anything, storing any avatar, publishing any event, or scheduling any task. It applies the same handle extraction and validation as Create Channel.
+
+The preview is independent of what is already tracked: previewing a channel that is already stored SHALL return its YouTube data like any other.
+
+#### Scenario: Previewing a channel by handle
+- **WHEN** a request supplies the handle `@somechannel` of a YouTube channel titled "Some Channel" with an avatar
+- **THEN** the system returns the handle `@somechannel`, the title "Some Channel" and the avatar's URL, and storage, the avatar store, events and tasks are unchanged
+
+#### Scenario: Previewing a channel by URL
+- **WHEN** a request supplies a YouTube channel URL carrying a handle (e.g. `https://www.youtube.com/@somechannel/videos`)
+- **THEN** the system returns the extracted handle `@somechannel` together with its YouTube title and avatar URL
+
+#### Scenario: Previewing a channel without an avatar
+- **WHEN** a request identifies a YouTube channel for which YouTube reports no avatar
+- **THEN** the system returns its handle and title with no avatar
+
+#### Scenario: Previewing an invalid value
+- **WHEN** a request omits the value, or supplies an empty value, a handle missing its leading `@`, a URL that is not a recognized YouTube URL, or a YouTube URL without a handle
+- **THEN** the system returns a bad request with a meaningful error description without contacting YouTube
+
+#### Scenario: Previewing a nonexistent channel
+- **WHEN** a request supplies a handle that does not correspond to an existing, accessible YouTube channel
+- **THEN** the system returns a not found response with a meaningful error description
+
+#### Scenario: YouTube unavailable
+- **WHEN** the YouTube lookup itself fails
+- **THEN** the system returns a bad gateway response with a meaningful error description
 
 ### Requirement: Delete Channel
 The system SHALL provide an HTTP endpoint that deletes a previously created channel identified by its handle.

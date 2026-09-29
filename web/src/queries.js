@@ -7,6 +7,8 @@ import {
   fetchPlaylists,
   fetchTasks,
   fetchVideos,
+  previewChannel,
+  previewPlaylist,
 } from './api'
 
 // The sidebar lists change rarely and are refetched right after the user's
@@ -21,6 +23,10 @@ export const queryKeys = {
   playlistVideos: (id) => ['playlists', id, 'videos'],
   recentVideos: ['videos', 'recent'],
   tasks: ['tasks'],
+  // Outside the `['playlists']` and `['channels']` prefixes so refetching the
+  // library leaves them be.
+  playlistPreview: (value) => ['playlist-preview', value],
+  channelPreview: (value) => ['channel-preview', value],
 }
 
 export function useChannels() {
@@ -36,6 +42,34 @@ export function usePlaylists() {
     queryKey: queryKeys.playlists,
     queryFn: fetchPlaylists,
     refetchInterval: LIBRARY_INTERVAL_MS,
+  })
+}
+
+/**
+ * Looks the entered playlist ID or URL up on YouTube. Keyed by the value, so
+ * a response never shows for input the field no longer holds.
+ */
+export function usePlaylistPreview(value) {
+  return useQuery({
+    queryKey: queryKeys.playlistPreview(value),
+    queryFn: () => previewPlaylist(value),
+    enabled: Boolean(value),
+    retry: false,
+    staleTime: Infinity,
+  })
+}
+
+/**
+ * Looks the entered channel handle or URL up on YouTube. Keyed by the value,
+ * so a response never shows for input the field no longer holds.
+ */
+export function useChannelPreview(value) {
+  return useQuery({
+    queryKey: queryKeys.channelPreview(value),
+    queryFn: () => previewChannel(value),
+    enabled: Boolean(value),
+    retry: false,
+    staleTime: Infinity,
   })
 }
 

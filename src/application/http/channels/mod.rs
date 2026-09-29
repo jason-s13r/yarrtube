@@ -4,18 +4,24 @@ use super::blocking::run_blocking;
 use super::error::ApiError;
 use super::validation::{MISSING_QUALITY, required};
 use super::videos::update_watch_state_error;
-use crate::domain::channel::{ChannelHandle, CreateChannelError, DeleteChannelError, VideoLimit};
+use crate::domain::channel::{
+    ChannelHandle, CreateChannelError, DeleteChannelError, PreviewChannelError, VideoLimit,
+};
 use crate::domain::playlist::PlaylistPath;
 use crate::domain::services::{
-    ChannelCreator, ChannelCreatorApi, ChannelDeleter, ChannelDeleterApi, ChannelVideoReconciler,
-    ChannelVideoReconcilerApi, ChannelViewSearcher, ChannelViewSearcherApi, CreateChannelOutcome,
-    VideoWatchStateUpdater, VideoWatchStateUpdaterApi,
+    ChannelCreator, ChannelCreatorApi, ChannelDeleter, ChannelDeleterApi, ChannelPreviewer,
+    ChannelPreviewerApi, ChannelVideoReconciler, ChannelVideoReconcilerApi, ChannelViewSearcher,
+    ChannelViewSearcherApi, CreateChannelOutcome, VideoWatchStateUpdater,
+    VideoWatchStateUpdaterApi,
 };
 use crate::domain::shared::Quality;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use dto::{ChannelListItemResponse, ChannelResponse, CreateChannelRequest};
+use dto::{
+    ChannelListItemResponse, ChannelPreviewResponse, ChannelResponse, CreateChannelRequest,
+    PreviewChannelQuery,
+};
 
 const MISSING_VIDEO_LIMIT: &str = "Video limit must be a positive integer (missing)";
 const MISSING_PATH: &str = "Channel path must not be empty";
@@ -42,6 +48,21 @@ pub async fn create_channel(
         Err(e @ CreateChannelError::YoutubeChannelNotFound(_)) => Err(ApiError::bad_request(e)),
         Err(e @ CreateChannelError::Lookup(_)) => Err(ApiError::new(StatusCode::BAD_GATEWAY, e)),
         Err(e @ CreateChannelError::Repository(_)) => Err(ApiError::internal(e)),
+    }
+}
+
+pub async fn preview_channel(
+    State(channel_previewer): State<ChannelPreviewer>,
+    Query(query): Query<PreviewChannelQuery>,
+) -> Result<Json<ChannelPreviewResponse>, ApiError> {
+    let id = ChannelHandle::from_url_or_handle(query.channel.unwrap_or_default())?;
+
+    match run_blocking(move || channel_previewer.preview(id)).await? {
+        Ok(preview) => Ok(Json(ChannelPreviewResponse::from(preview))),
+        Err(e @ PreviewChannelError::YoutubeChannelNotFound(_)) => {
+            Err(ApiError::new(StatusCode::NOT_FOUND, e))
+        }
+        Err(e @ PreviewChannelError::Lookup(_)) => Err(ApiError::new(StatusCode::BAD_GATEWAY, e)),
     }
 }
 
@@ -352,6 +373,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_return_the_existing_channel_if_handle_differs_in_case() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.connection()));
+        let event_repository = SqliteEventRepository::new(db.shared_connection());
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let channel_creator = ChannelCreator::new(
+            channel_repository.clone(),
+            resolving(Some(resolved_channel())),
+            Arc::new(FakeChannelAvatarRepository::default()),
+            event_publisher(&db),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let response = create(channel_creator, create_request("@SomeChannel")).await;
+
+        assert_eq!(response, Ok((StatusCode::OK, some_channel_response())));
+        assert_eq!(
+            channel_repository.list().unwrap(),
+            vec![channel("@somechannel")]
+        );
+        assert_eq!(event_repository.list_eligible().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
     async fn it_should_publish_channel_created_only_once() {
         let db = TestDatabase::new();
         let channel_repository = Arc::new(SqliteChannelRepository::new(db.connection()));
@@ -511,6 +556,111 @@ mod tests {
         );
         assert_eq!(channel_repository.list().unwrap(), vec![]);
         assert_eq!(event_repository.list_eligible().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn it_should_preview_a_channel() {
+        let db = TestDatabase::new();
+        let channel_repository = SqliteChannelRepository::new(db.connection());
+        let event_repository = SqliteEventRepository::new(db.shared_connection());
+        let task_repository = SqliteTaskRepository::new(
+            db.shared_connection(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+        let channel_previewer =
+            ChannelPreviewer::new(resolving(Some(resolved_channel_with_avatar())));
+
+        let response = preview(channel_previewer, preview_query("@somechannel")).await;
+
+        assert_eq!(response, Ok(channel_preview_response()));
+        assert_eq!(channel_repository.list().unwrap(), vec![]);
+        assert_eq!(event_repository.list_eligible().unwrap(), vec![]);
+        assert_eq!(task_repository.list_non_completed().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn it_should_preview_a_channel_from_a_youtube_url() {
+        let channel_previewer =
+            ChannelPreviewer::new(resolving(Some(resolved_channel_with_avatar())));
+
+        let response = preview(
+            channel_previewer,
+            preview_query("https://www.youtube.com/@somechannel/videos"),
+        )
+        .await;
+
+        assert_eq!(response, Ok(channel_preview_response()));
+    }
+
+    #[tokio::test]
+    async fn it_should_preview_a_channel_without_an_avatar() {
+        let channel_previewer = ChannelPreviewer::new(resolving(Some(resolved_channel())));
+
+        let response = preview(channel_previewer, preview_query("@somechannel")).await;
+
+        assert_eq!(
+            response,
+            Ok(ChannelPreviewResponse {
+                avatar_url: None,
+                ..channel_preview_response()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_preview_if_invalid_channel_provided() {
+        let response = preview(any_channel_previewer(), preview_query("somechannel")).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "Channel handle must start with \"@\" (got \"somechannel\")"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_preview_if_channel_missing() {
+        let query = PreviewChannelQuery { channel: None };
+
+        let response = preview(any_channel_previewer(), query).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "Channel handle or URL must not be empty"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_preview_if_channel_not_found_on_youtube() {
+        let channel_previewer = ChannelPreviewer::new(resolving(None));
+
+        let response = preview(channel_previewer, preview_query("@somechannel")).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "YouTube channel @somechannel does not exist or is not accessible"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_preview_if_youtube_lookup_fails() {
+        let channel_previewer = ChannelPreviewer::new(Arc::new(FailingYoutubeChannelRepository));
+
+        let response = preview(channel_previewer, preview_query("@somechannel")).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "YouTube API request failed"
+            ))
+        );
     }
 
     #[tokio::test]
@@ -1158,6 +1308,12 @@ mod tests {
         )
     }
 
+    /// A previewer for tests whose request is rejected before reaching it. Its
+    /// lookup fails, so a request that wrongly reaches YouTube fails loudly.
+    fn any_channel_previewer() -> ChannelPreviewer {
+        ChannelPreviewer::new(Arc::new(FailingYoutubeChannelRepository))
+    }
+
     /// A deleter for tests whose request is rejected before reaching it (see
     /// `any_channel_creator`).
     fn any_channel_deleter() -> ChannelDeleter {
@@ -1419,6 +1575,20 @@ mod tests {
         }
     }
 
+    fn preview_query(channel: &str) -> PreviewChannelQuery {
+        PreviewChannelQuery {
+            channel: Some(channel.to_string()),
+        }
+    }
+
+    fn channel_preview_response() -> ChannelPreviewResponse {
+        ChannelPreviewResponse {
+            id: "@somechannel".to_string(),
+            title: "Some Channel".to_string(),
+            avatar_url: Some(AVATAR_URL.to_string()),
+        }
+    }
+
     fn some_channel_response() -> ChannelResponse {
         ChannelResponse {
             id: "@somechannel".to_string(),
@@ -1449,6 +1619,15 @@ mod tests {
         create_channel(State(channel_creator), Json(request))
             .await
             .map(|(status, Json(channel))| (status, channel))
+    }
+
+    async fn preview(
+        channel_previewer: ChannelPreviewer,
+        query: PreviewChannelQuery,
+    ) -> Result<ChannelPreviewResponse, ApiError> {
+        preview_channel(State(channel_previewer), Query(query))
+            .await
+            .map(|Json(preview)| preview)
     }
 
     async fn delete(

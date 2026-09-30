@@ -72,6 +72,23 @@ command):
 | `YARRTUBE_DOWNLOAD_CONCURRENCY`       | `2`                | How many videos download at the same time. Higher values download faster but make YouTube more likely to throttle or bot-check you |
 | `YTDLP_PATH`                          | `/app/bin/yt-dlp`  | Path to the managed `yt-dlp` binary (also the path bundled into the image at build time) |
 | `RUST_LOG`                            | `info`             | Log verbosity (e.g. `RUST_LOG=debug`)                                                    |
+| `YARRTUBE_PLEX_URL`                   | —                  | Base URL of your Plex server (e.g. `http://192.168.1.10:32400`). Enables the [Plex collections integration](#plex-collections) |
+| `YARRTUBE_PLEX_TOKEN`                 | —                  | Plex authentication token (`X-Plex-Token`)                                               |
+| `YARRTUBE_PLEX_SECTION_ID`            | —                  | ID(s) of the Plex library section(s) holding yarrtube's videos, comma-separated when content is spread across several libraries (e.g. `2,5`) |
+| `YARRTUBE_PLEX_RECONCILE_INTERVAL_SECONDS` | `900`         | How often Plex collections are synced toward yarrtube's state                            |
+
+## Plex collections
+
+Yarrtube can keep one Plex collection per tracked playlist and channel,
+turning a flat library of thousands of loose videos into one tile per
+playlist/channel, with correct in-playlist ordering and autoplay across
+episodes. The integration is off by default: it activates only when
+`YARRTUBE_PLEX_URL`, `YARRTUBE_PLEX_TOKEN` and `YARRTUBE_PLEX_SECTION_ID`
+are all set.
+
+The Plex-side setup (library configuration, obtaining the token and
+section ID, recommended library settings) is covered step by step in
+[PLEX.md](PLEX.md).
 
 ## Updating
 

@@ -3,8 +3,8 @@ use crate::application::{subscribers, tasks};
 use crate::domain::services::{
     ChannelCreator, ChannelDeleter, ChannelPreviewer, ChannelVideoReconciler, ChannelViewSearcher,
     DirectorySearcher, PlaylistCreator, PlaylistDeleter, PlaylistPreviewer, PlaylistSearcher,
-    PlaylistVideoReconciler, TaskViewSearcher, ThumbnailFetcher, VideoDownloader, VideoFileDeleter,
-    VideoSearcher, VideoWatchStateUpdater,
+    PlaylistVideoReconciler, PlexCollectionDeleter, PlexCollectionReconciler, TaskViewSearcher,
+    ThumbnailFetcher, VideoDownloader, VideoFileDeleter, VideoSearcher, VideoWatchStateUpdater,
 };
 use crate::infrastructure::client::ytdlp_updater::{RealYtdlpUpdater, YtdlpUpdater, target_path};
 use crate::infrastructure::infrastructure_container::{
@@ -12,6 +12,9 @@ use crate::infrastructure::infrastructure_container::{
 };
 use crate::infrastructure::repositories::domain_events_consumer::{
     DomainEventsConsumer, SubscriberRegistry,
+};
+use crate::infrastructure::repositories::plex_collection_repository::{
+    HttpPlexCollectionRepository, PlexCollectionRepository, PlexConfig,
 };
 use crate::infrastructure::repositories::task_executor::{HandlerRegistry, TaskExecutor};
 use crate::infrastructure::shared::web_assets::WebAssets;
@@ -37,6 +40,7 @@ const DEFAULT_RETRY_BASE_DELAY_SECONDS: i64 = 150;
 const DEFAULT_VIDEOS_PATH: &str = "/videos";
 const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 2;
 const DEFAULT_AVATARS_PATH: &str = "avatars";
+const DEFAULT_PLEX_RECONCILE_INTERVAL_SECONDS: i64 = 900;
 /// The parent directories the add dialog's folder browser defaults to, seeded
 /// under the videos root at startup so the browser is never empty on a fresh
 /// install.
@@ -147,6 +151,54 @@ fn run_startup_storage_directories_check() {
     create_default_storage_directories(std::path::Path::new(&videos_path()));
 }
 
+fn plex_reconcile_interval_seconds() -> i64 {
+    std::env::var("YARRTUBE_PLEX_RECONCILE_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_PLEX_RECONCILE_INTERVAL_SECONDS)
+}
+
+/// The Plex integration's adapter and target sections, present only when
+/// the daemon is configured to talk to a Plex server: all of
+/// `YARRTUBE_PLEX_URL`, `YARRTUBE_PLEX_TOKEN` and `YARRTUBE_PLEX_SECTION_ID`
+/// (one section id, or a comma-separated list for content spread across
+/// several libraries) must be set to a non-empty value (wrappers like
+/// `run-local.sh` pass empty strings for unset variables). When absent,
+/// nothing Plex-related is wired and the daemon behaves exactly as without
+/// the integration.
+#[derive(Clone)]
+struct PlexIntegration {
+    repository: Arc<dyn PlexCollectionRepository>,
+    section_ids: Vec<String>,
+}
+
+fn plex_integration() -> Option<PlexIntegration> {
+    let base_url = non_empty_env("YARRTUBE_PLEX_URL")?;
+    let token = non_empty_env("YARRTUBE_PLEX_TOKEN")?;
+    let section_ids: Vec<String> = non_empty_env("YARRTUBE_PLEX_SECTION_ID")?
+        .split(',')
+        .map(str::trim)
+        .filter(|section_id| !section_id.is_empty())
+        .map(str::to_string)
+        .collect();
+    if section_ids.is_empty() {
+        return None;
+    }
+    Some(PlexIntegration {
+        repository: Arc::new(HttpPlexCollectionRepository::new(PlexConfig {
+            base_url,
+            token,
+        })),
+        section_ids,
+    })
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn youtube_api_key() -> String {
     std::env::var("YOUTUBE_API_KEY").unwrap_or_default()
 }
@@ -176,10 +228,13 @@ fn build_infrastructure() -> Result<InfrastructureContainer> {
 }
 
 /// Must run before the task executor starts polling: requeues tasks a
-/// previous run left `running` and seeds the recurring yt-dlp self-update.
+/// previous run left `running` and seeds the recurring yt-dlp self-update
+/// and, when the Plex integration is enabled, the recurring Plex
+/// collections reconcile.
 fn prepare_task_queue(
     infrastructure: &InfrastructureContainer,
     task_executor: &TaskExecutor,
+    plex_enabled: bool,
 ) -> Result<()> {
     task_executor
         .recover_stuck_tasks()
@@ -191,7 +246,16 @@ fn prepare_task_queue(
         infrastructure.task_repository.as_ref(),
         update_ytdlp_first_run_at,
     )
-    .context("failed to schedule the recurring yt-dlp self-update task")
+    .context("failed to schedule the recurring yt-dlp self-update task")?;
+
+    if plex_enabled {
+        tasks::reconcile_plex_collections_task::schedule_reconcile_plex_collections_if_absent(
+            &infrastructure.task_repository,
+            &infrastructure.clock,
+        )
+        .context("failed to schedule the recurring Plex collections reconcile task")?;
+    }
+    Ok(())
 }
 
 fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
@@ -262,15 +326,21 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
     }
 }
 
-fn event_consumer(infrastructure: &InfrastructureContainer) -> DomainEventsConsumer {
+fn event_consumer(
+    infrastructure: &InfrastructureContainer,
+    plex: Option<PlexIntegration>,
+) -> DomainEventsConsumer {
     DomainEventsConsumer::new(
         infrastructure.event_repository.clone(),
-        event_subscribers(infrastructure),
+        event_subscribers(infrastructure, plex),
         infrastructure.clock.clone(),
     )
 }
 
-fn event_subscribers(infrastructure: &InfrastructureContainer) -> SubscriberRegistry {
+fn event_subscribers(
+    infrastructure: &InfrastructureContainer,
+    plex: Option<PlexIntegration>,
+) -> SubscriberRegistry {
     subscribers::registry(
         playlist_video_reconciler(infrastructure),
         channel_video_reconciler(infrastructure),
@@ -279,20 +349,27 @@ fn event_subscribers(infrastructure: &InfrastructureContainer) -> SubscriberRegi
         infrastructure.task_repository.clone(),
         infrastructure.clock.clone(),
         videos_path(),
+        plex.map(|plex| PlexCollectionDeleter::new(plex.section_ids, plex.repository)),
     )
 }
 
-fn task_executor(infrastructure: &InfrastructureContainer) -> TaskExecutor {
+fn task_executor(
+    infrastructure: &InfrastructureContainer,
+    plex: Option<PlexIntegration>,
+) -> TaskExecutor {
     TaskExecutor::new(
         infrastructure.task_repository.clone(),
-        task_handlers(infrastructure),
+        task_handlers(infrastructure, plex),
         infrastructure.clock.clone(),
         retry_base_delay_seconds(),
         download_concurrency(),
     )
 }
 
-fn task_handlers(infrastructure: &InfrastructureContainer) -> HandlerRegistry {
+fn task_handlers(
+    infrastructure: &InfrastructureContainer,
+    plex: Option<PlexIntegration>,
+) -> HandlerRegistry {
     tasks::registry(
         playlist_video_reconciler(infrastructure),
         channel_video_reconciler(infrastructure),
@@ -304,6 +381,29 @@ fn task_handlers(infrastructure: &InfrastructureContainer) -> HandlerRegistry {
         infrastructure.clock.clone(),
         infrastructure.ytdlp_updater.clone(),
         target_path(),
+        plex.map(|plex| {
+            tasks::reconcile_plex_collections_task::ReconcilePlexCollectionsTask::new(
+                plex_collection_reconciler(infrastructure, plex),
+                infrastructure.task_repository.clone(),
+                infrastructure.clock.clone(),
+                plex_reconcile_interval_seconds(),
+            )
+        }),
+    )
+}
+
+fn plex_collection_reconciler(
+    infrastructure: &InfrastructureContainer,
+    plex: PlexIntegration,
+) -> PlexCollectionReconciler {
+    PlexCollectionReconciler::new(
+        plex.section_ids,
+        infrastructure.playlist_repository.clone(),
+        infrastructure.channel_repository.clone(),
+        infrastructure.playlist_video_repository.clone(),
+        infrastructure.channel_video_repository.clone(),
+        infrastructure.video_repository.clone(),
+        plex.repository,
     )
 }
 
@@ -415,9 +515,10 @@ async fn serve_http(port: u16, api_services: ApiServices) -> Result<()> {
 async fn run_async(
     infrastructure: InfrastructureContainer,
     task_executor: Arc<TaskExecutor>,
+    plex: Option<PlexIntegration>,
 ) -> ExitCode {
     tokio::spawn(heartbeat_loop());
-    tokio::spawn(Arc::new(event_consumer(&infrastructure)).run(BACKGROUND_POLL_INTERVAL));
+    tokio::spawn(Arc::new(event_consumer(&infrastructure, plex)).run(BACKGROUND_POLL_INTERVAL));
     tokio::spawn(task_executor.run(BACKGROUND_POLL_INTERVAL));
 
     if let Err(e) = serve_http(port(), api_services(&infrastructure)).await {
@@ -457,8 +558,9 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let task_executor = Arc::new(task_executor(&infrastructure));
-    if let Err(e) = prepare_task_queue(&infrastructure, &task_executor) {
+    let plex = plex_integration();
+    let task_executor = Arc::new(task_executor(&infrastructure, plex.clone()));
+    if let Err(e) = prepare_task_queue(&infrastructure, &task_executor, plex.is_some()) {
         error!(error = %e, "failed to prepare the task queue");
         return ExitCode::FAILURE;
     }
@@ -474,7 +576,7 @@ pub fn run() -> ExitCode {
         }
     };
 
-    runtime.block_on(run_async(infrastructure, task_executor))
+    runtime.block_on(run_async(infrastructure, task_executor, plex))
 }
 
 #[cfg(test)]
@@ -706,7 +808,7 @@ mod tests {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
 
-        let handlers = task_handlers(&infrastructure);
+        let handlers = task_handlers(&infrastructure, None);
 
         assert_eq!(
             handlers.keys().map(String::as_str).collect::<BTreeSet<_>>(),
@@ -728,7 +830,7 @@ mod tests {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
 
-        let subscribers = event_subscribers(&infrastructure);
+        let subscribers = event_subscribers(&infrastructure, None);
 
         assert_eq!(
             subscribers

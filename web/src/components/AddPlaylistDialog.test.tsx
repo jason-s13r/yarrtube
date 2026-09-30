@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AddPlaylistDialog } from './AddPlaylistDialog'
@@ -19,6 +19,193 @@ function renderDialog(routes: Routes) {
 }
 
 describe('AddPlaylistDialog', () => {
+  afterEach(() => {
+    window.localStorage.clear()
+  })
+
+  it('shows the save-to list with the default parent selected on open', async () => {
+    renderDialog({})
+
+    expect(await screen.findByRole('radio', { name: /playlists\// })).toBeChecked()
+    expect(screen.getByRole('button', { name: 'Choose another folder…' })).toBeInTheDocument()
+  })
+
+  it('suggests parent folders of tracked playlists with their counts', async () => {
+    renderDialog({
+      'GET /api/playlists': [
+        aPlaylist({ path: 'playlists/kids/contes' }),
+        aPlaylist({ path: 'playlists/kids/fa-la-la' }),
+      ],
+    })
+
+    const kids = await screen.findByRole('radio', { name: 'playlists/kids/' })
+    expect(kids).not.toBeChecked()
+    expect(screen.getByText('· 2 items')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'playlists/', checked: true })).toBeInTheDocument()
+  })
+
+  it('selects a suggested folder in one click and the notice follows', async () => {
+    renderDialog({
+      'GET /api/playlists': [aPlaylist({ path: 'playlists/kids/contes' })],
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    expect(await screen.findByText('/videos/playlists/my-mix')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('radio', { name: 'playlists/kids/' }))
+
+    expect(await screen.findByText('/videos/playlists/kids/my-mix')).toBeInTheDocument()
+  })
+
+  it('orders suggestions by most recent use and caps them', async () => {
+    renderDialog({
+      'GET /api/playlists': ['a', 'b', 'c', 'd', 'e', 'f'].map((name, index) =>
+        aPlaylist({
+          path: `playlists/${name}/item`,
+          created_at: `2026-01-0${index + 1}T00:00:00Z`,
+        }),
+      ),
+    })
+
+    // The default parent plus the 4 most recently used of the 6 derived ones.
+    expect(await screen.findByRole('radio', { name: 'playlists/f/' })).toBeInTheDocument()
+    const names = screen
+      .getAllByRole('radio')
+      .map((radio) => radio.getAttribute('aria-label'))
+    expect(names).toEqual(['playlists/', 'playlists/f/', 'playlists/e/', 'playlists/d/', 'playlists/c/'])
+  })
+
+  it('preselects the remembered parent when still suggested', async () => {
+    window.localStorage.setItem('yarrtube.save-to.playlist', 'playlists/kids')
+    renderDialog({
+      'GET /api/playlists': [aPlaylist({ path: 'playlists/kids/contes' })],
+    })
+
+    expect(
+      await screen.findByRole('radio', { name: 'playlists/kids/', checked: true }),
+    ).toBeInTheDocument()
+  })
+
+  it('falls back to the default parent when the remembered one is stale', async () => {
+    window.localStorage.setItem('yarrtube.save-to.playlist', 'playlists/gone')
+    renderDialog({
+      'GET /api/playlists': [aPlaylist({ path: 'playlists/kids/contes' })],
+    })
+
+    expect(await screen.findByRole('radio', { name: 'playlists/kids/' })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'playlists/', checked: true })).toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: 'playlists/gone/' })).not.toBeInTheDocument()
+  })
+
+  it('remembers the submitted parent for the next open', async () => {
+    mockApi({
+      ...baseRoutes,
+      'GET /api/playlists': [aPlaylist({ path: 'playlists/kids/contes' })],
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+      'POST /api/playlists': aPlaylist(),
+    })
+    const onOpenChange = vi.fn()
+    const { rerender } = renderWithProviders(
+      <AddPlaylistDialog open onOpenChange={onOpenChange} />,
+    )
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    await user.click(await screen.findByRole('radio', { name: 'playlists/kids/' }))
+    const submit = screen.getByRole('button', { name: 'Create Playlist' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+
+    rerender(<AddPlaylistDialog open={false} onOpenChange={onOpenChange} />)
+    rerender(<AddPlaylistDialog open onOpenChange={onOpenChange} />)
+
+    expect(
+      await screen.findByRole('radio', { name: 'playlists/kids/', checked: true }),
+    ).toBeInTheDocument()
+  })
+
+  it('opens the browser from choose-another and keeps the chosen folder selected', async () => {
+    renderDialog({
+      'GET /api/playlists': [aPlaylist({ name: 'Kids Mix', path: 'playlists/kids' })],
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+      'GET /api/directories?path=playlists': {
+        root: '/videos',
+        path: 'playlists',
+        entries: [{ name: 'kids' }, { name: 'music' }],
+      },
+      'GET /api/directories?path=playlists%2Fmusic': {
+        root: '/videos',
+        path: 'playlists/music',
+        entries: [],
+      },
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    await screen.findByText('/videos/playlists/my-mix')
+
+    await user.click(screen.getByRole('button', { name: 'Choose another folder…' }))
+    expect(await screen.findByText('in use by Kids Mix')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /music/ }))
+    expect(await screen.findByText('No subfolders here.')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Use this folder' }))
+
+    expect(
+      await screen.findByRole('radio', { name: 'playlists/music/', checked: true }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('/videos/playlists/music/my-mix')).toBeInTheDocument()
+  })
+
+  it('shows no change action in the notice', async () => {
+    renderDialog({
+      'GET /api/playlists': [
+        aPlaylist({ name: 'Other Mix', path: 'playlists/my-mix' }),
+        aPlaylist({ path: 'playlists/kids/contes' }),
+      ],
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+
+    // The destination-occupied error offers no change action…
+    await screen.findByText(/is already used by Other Mix/)
+    expect(screen.queryByRole('button', { name: 'change' })).not.toBeInTheDocument()
+
+    // …and neither does the info notice once the destination is free.
+    await user.click(screen.getByRole('radio', { name: 'playlists/kids/' }))
+    await screen.findByText(/All 3 videos from “My Mix” will be downloaded to/)
+    expect(screen.queryByRole('button', { name: 'change' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the folder name and quality under advanced options', async () => {
+    renderDialog({
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    await screen.findByText('/videos/playlists/my-mix')
+
+    expect(screen.getByLabelText('Folder name')).not.toBeVisible()
+    expect(screen.getByText('Video quality')).not.toBeVisible()
+
+    await user.click(screen.getByRole('button', { name: /Advanced options/ }))
+    const folderName = screen.getByLabelText('Folder name')
+    expect(folderName).toBeVisible()
+    expect(folderName).toHaveValue('my-mix')
+
+    await user.clear(folderName)
+    await user.type(folderName, 'custom-folder')
+
+    expect(await screen.findByText('/videos/playlists/custom-folder')).toBeInTheDocument()
+  })
+
   it('looks the entered playlist up and states the destination', async () => {
     renderDialog({
       'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },

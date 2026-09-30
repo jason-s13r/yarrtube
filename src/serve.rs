@@ -159,38 +159,67 @@ fn plex_reconcile_interval_seconds() -> i64 {
 }
 
 /// The Plex integration's adapter and target sections, present only when
-/// the daemon is configured to talk to a Plex server: all of
-/// `YARRTUBE_PLEX_URL`, `YARRTUBE_PLEX_TOKEN` and `YARRTUBE_PLEX_SECTION_ID`
-/// (one section id, or a comma-separated list for content spread across
+/// the daemon is configured to talk to a Plex server: `YARRTUBE_PLEX_URL`,
+/// `YARRTUBE_PLEX_TOKEN` and at least one of
+/// `YARRTUBE_PLEX_PLAYLIST_SECTION_ID` / `YARRTUBE_PLEX_CHANNEL_SECTION_ID`
+/// (each one section id, or a comma-separated list for content spread across
 /// several libraries) must be set to a non-empty value (wrappers like
-/// `run-local.sh` pass empty strings for unset variables). When absent,
+/// `run-local.sh` pass empty strings for unset variables). Each section is
+/// scoped to a single kind: playlist sections are reconciled against tracked
+/// playlists and channel sections against tracked channels. When absent,
 /// nothing Plex-related is wired and the daemon behaves exactly as without
 /// the integration.
 #[derive(Clone)]
 struct PlexIntegration {
     repository: Arc<dyn PlexCollectionRepository>,
-    section_ids: Vec<String>,
+    playlist_section_ids: Vec<String>,
+    channel_section_ids: Vec<String>,
 }
 
 fn plex_integration() -> Option<PlexIntegration> {
     let base_url = non_empty_env("YARRTUBE_PLEX_URL")?;
     let token = non_empty_env("YARRTUBE_PLEX_TOKEN")?;
-    let section_ids: Vec<String> = non_empty_env("YARRTUBE_PLEX_SECTION_ID")?
-        .split(',')
-        .map(str::trim)
-        .filter(|section_id| !section_id.is_empty())
-        .map(str::to_string)
-        .collect();
-    if section_ids.is_empty() {
-        return None;
-    }
+    let (playlist_section_ids, channel_section_ids) = plex_section_ids(
+        std::env::var("YARRTUBE_PLEX_PLAYLIST_SECTION_ID").ok(),
+        std::env::var("YARRTUBE_PLEX_CHANNEL_SECTION_ID").ok(),
+    )?;
     Some(PlexIntegration {
         repository: Arc::new(HttpPlexCollectionRepository::new(PlexConfig {
             base_url,
             token,
         })),
-        section_ids,
+        playlist_section_ids,
+        channel_section_ids,
     })
+}
+
+/// Parses the two kind-scoped section lists, returning `None` when both are
+/// empty — the signal that the integration stays off. A present list keeps
+/// only its non-empty, trimmed comma-separated entries.
+fn plex_section_ids(
+    playlist: Option<String>,
+    channel: Option<String>,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let playlist_section_ids = parse_section_ids(playlist);
+    let channel_section_ids = parse_section_ids(channel);
+    if playlist_section_ids.is_empty() && channel_section_ids.is_empty() {
+        return None;
+    }
+    Some((playlist_section_ids, channel_section_ids))
+}
+
+fn parse_section_ids(value: Option<String>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|section_id| !section_id.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -349,7 +378,13 @@ fn event_subscribers(
         infrastructure.task_repository.clone(),
         infrastructure.clock.clone(),
         videos_path(),
-        plex.map(|plex| PlexCollectionDeleter::new(plex.section_ids, plex.repository)),
+        plex.map(|plex| {
+            PlexCollectionDeleter::new(
+                plex.playlist_section_ids,
+                plex.channel_section_ids,
+                plex.repository,
+            )
+        }),
     )
 }
 
@@ -397,7 +432,8 @@ fn plex_collection_reconciler(
     plex: PlexIntegration,
 ) -> PlexCollectionReconciler {
     PlexCollectionReconciler::new(
-        plex.section_ids,
+        plex.playlist_section_ids,
+        plex.channel_section_ids,
         infrastructure.playlist_repository.clone(),
         infrastructure.channel_repository.clone(),
         infrastructure.playlist_video_repository.clone(),
@@ -847,6 +883,39 @@ mod tests {
                 ("video_removed_from_channel", 1),
                 ("video_removed_from_playlist", 1),
             ])
+        );
+    }
+
+    #[test]
+    fn it_should_disable_plex_when_both_section_lists_are_empty() {
+        assert_eq!(plex_section_ids(None, None), None);
+        assert_eq!(
+            plex_section_ids(Some(String::new()), Some("  ,  ".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn it_should_enable_plex_with_only_playlist_sections() {
+        assert_eq!(
+            plex_section_ids(Some("19, 21".to_string()), None),
+            Some((vec!["19".to_string(), "21".to_string()], vec![]))
+        );
+    }
+
+    #[test]
+    fn it_should_enable_plex_with_only_channel_sections() {
+        assert_eq!(
+            plex_section_ids(Some(String::new()), Some("20".to_string())),
+            Some((vec![], vec!["20".to_string()]))
+        );
+    }
+
+    #[test]
+    fn it_should_enable_plex_with_both_playlist_and_channel_sections() {
+        assert_eq!(
+            plex_section_ids(Some("19".to_string()), Some("20".to_string())),
+            Some((vec!["19".to_string()], vec!["20".to_string()]))
         );
     }
 

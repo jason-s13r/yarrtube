@@ -13,12 +13,15 @@ use tracing::{debug, error, info};
 
 /// Converges every tracked playlist's and channel's Plex collection toward
 /// yarrtube's downloaded videos in one pass, matching them by YouTube ID.
-/// Covers every configured library section: a collection materializes in
-/// the section(s) whose library holds that playlist's/channel's scanned
-/// videos.
+/// Each configured section is scoped to exactly one kind: a playlist section
+/// is reconciled against tracked playlists only and a channel section against
+/// tracked channels only, so a video shared between a playlist and a
+/// subscribed channel can never leak a channel collection into a playlist
+/// library (or vice versa).
 #[derive(Clone)]
 pub struct PlexCollectionReconciler {
-    section_ids: Vec<String>,
+    playlist_section_ids: Vec<String>,
+    channel_section_ids: Vec<String>,
     playlist_repository: Arc<dyn PlaylistRepository>,
     channel_repository: Arc<dyn ChannelRepository>,
     playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
@@ -30,7 +33,8 @@ pub struct PlexCollectionReconciler {
 impl PlexCollectionReconciler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        section_ids: Vec<String>,
+        playlist_section_ids: Vec<String>,
+        channel_section_ids: Vec<String>,
         playlist_repository: Arc<dyn PlaylistRepository>,
         channel_repository: Arc<dyn ChannelRepository>,
         playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
@@ -39,7 +43,8 @@ impl PlexCollectionReconciler {
         plex_collection_repository: Arc<dyn PlexCollectionRepository>,
     ) -> Self {
         Self {
-            section_ids,
+            playlist_section_ids,
+            channel_section_ids,
             playlist_repository,
             channel_repository,
             playlist_video_repository,
@@ -51,20 +56,26 @@ impl PlexCollectionReconciler {
 }
 
 pub trait PlexCollectionReconcilerApi: Send + Sync {
-    /// One convergence pass over every configured section, each covering
-    /// every playlist and channel. Per-collection failures are logged and
-    /// skipped; a section-wide failure (e.g. its item listing) is logged,
-    /// the remaining sections still reconcile, and the first such error is
-    /// returned.
+    /// One convergence pass: each playlist section is reconciled against
+    /// tracked playlists only and each channel section against tracked
+    /// channels only. Per-collection failures are logged and skipped; a
+    /// section-wide failure (e.g. its item listing) is logged, the remaining
+    /// sections still reconcile, and the first such error is returned.
     fn reconcile_all(&self) -> anyhow::Result<()>;
 }
 
 impl PlexCollectionReconcilerApi for PlexCollectionReconciler {
     fn reconcile_all(&self) -> anyhow::Result<()> {
         let mut first_error = None;
-        for section_id in &self.section_ids {
-            if let Err(e) = self.reconcile_section(section_id) {
-                error!(section = section_id, error = %e, "failed to reconcile Plex section, skipping");
+        for section_id in &self.playlist_section_ids {
+            if let Err(e) = self.reconcile_playlist_section(section_id) {
+                error!(section = section_id, error = %e, "failed to reconcile Plex playlist section, skipping");
+                first_error.get_or_insert(e);
+            }
+        }
+        for section_id in &self.channel_section_ids {
+            if let Err(e) = self.reconcile_channel_section(section_id) {
+                error!(section = section_id, error = %e, "failed to reconcile Plex channel section, skipping");
                 first_error.get_or_insert(e);
             }
         }
@@ -80,17 +91,10 @@ fn log_and_skip_failure(name: &str, result: anyhow::Result<()>) {
 }
 
 impl PlexCollectionReconciler {
-    /// Converges one section's collections toward yarrtube's state.
-    fn reconcile_section(&self, section_id: &str) -> anyhow::Result<()> {
-        let scanned = self.scanned_items_by_youtube_id(section_id)?;
-        let collections = self.collections_by_title(section_id)?;
-        info!(
-            section = section_id,
-            scanned_items = scanned.len(),
-            collections = collections.len(),
-            "reconciling Plex section"
-        );
-
+    /// Converges one playlist section's collections toward its tracked
+    /// playlists, never touching tracked channels.
+    fn reconcile_playlist_section(&self, section_id: &str) -> anyhow::Result<()> {
+        let (scanned, collections) = self.section_setup(section_id)?;
         for playlist in self.playlist_repository.list()? {
             let result = self
                 .playlist_desired_rating_keys(&playlist.id, &scanned)
@@ -104,6 +108,13 @@ impl PlexCollectionReconciler {
                 });
             log_and_skip_failure(playlist.name.as_str(), result);
         }
+        Ok(())
+    }
+
+    /// Converges one channel section's collections toward its tracked
+    /// channels, never touching tracked playlists.
+    fn reconcile_channel_section(&self, section_id: &str) -> anyhow::Result<()> {
+        let (scanned, collections) = self.section_setup(section_id)?;
         for channel in self.channel_repository.list()? {
             let result = self
                 .channel_desired_rating_keys(&channel.id, &scanned)
@@ -113,6 +124,24 @@ impl PlexCollectionReconciler {
             log_and_skip_failure(&channel.name, result);
         }
         Ok(())
+    }
+
+    /// The per-section state both kinds' passes start from: the section's
+    /// scanned items keyed by YouTube ID, and its existing collections keyed
+    /// by title.
+    fn section_setup(
+        &self,
+        section_id: &str,
+    ) -> anyhow::Result<(HashMap<String, String>, HashMap<String, String>)> {
+        let scanned = self.scanned_items_by_youtube_id(section_id)?;
+        let collections = self.collections_by_title(section_id)?;
+        info!(
+            section = section_id,
+            scanned_items = scanned.len(),
+            collections = collections.len(),
+            "reconciling Plex section"
+        );
+        Ok((scanned, collections))
     }
 
     /// The section's scanned items, keyed by YouTube video ID.

@@ -23,7 +23,7 @@ impl DeletePlexCollectionOnChannelDeleted {
 impl EventSubscriber for DeletePlexCollectionOnChannelDeleted {
     fn handle(&self, payload: &str) -> anyhow::Result<()> {
         let payload: ChannelDeletedPayload = serde_json::from_str(payload)?;
-        self.deleter.delete(&payload.name)
+        self.deleter.delete_channel_collection(&payload.name)
     }
 }
 
@@ -47,6 +47,7 @@ mod tests {
             }],
         ));
         let subscriber = DeletePlexCollectionOnChannelDeleted::new(PlexCollectionDeleter::new(
+            vec![],
             vec!["1".to_string()],
             plex_repository.clone(),
         ));
@@ -58,6 +59,51 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(plex_repository.collections(), vec![]);
+    }
+
+    #[test]
+    fn it_should_not_delete_a_same_named_collection_in_a_playlist_section() {
+        let plex_repository = Arc::new(
+            FakePlexCollectionRepository::with_items_and_collections(
+                "2",
+                vec![],
+                vec![FakePlexCollection {
+                    rating_key: "c1".to_string(),
+                    title: "Some Channel".to_string(),
+                    member_rating_keys: vec![],
+                }],
+            )
+            .and_section(
+                "5",
+                vec![],
+                vec![FakePlexCollection {
+                    rating_key: "c2".to_string(),
+                    title: "Some Channel".to_string(),
+                    member_rating_keys: vec![],
+                }],
+            ),
+        );
+        let subscriber = DeletePlexCollectionOnChannelDeleted::new(PlexCollectionDeleter::new(
+            vec!["2".to_string()],
+            vec!["5".to_string()],
+            plex_repository.clone(),
+        ));
+
+        let result = handle(
+            &subscriber,
+            r#"{"channel_id": "@somechannel", "name": "Some Channel", "path": "creators/somechannel"}"#,
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            plex_repository.collections_in("2"),
+            vec![FakePlexCollection {
+                rating_key: "c1".to_string(),
+                title: "Some Channel".to_string(),
+                member_rating_keys: vec![],
+            }]
+        );
+        assert_eq!(plex_repository.collections_in("5"), vec![]);
     }
 
     fn handle(

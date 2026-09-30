@@ -70,9 +70,29 @@ Short version: in the Plex web app, open any library item → `⋯` →
 *Get Info* → *View XML*, and copy the `X-Plex-Token=...` value from the
 opened page's URL.
 
-## 4. Find the library section ID(s) (`YARRTUBE_PLEX_SECTION_ID`)
+## 4. Find the library section ID(s)
 
-Two ways:
+yarrtube reconciles collections **per kind**: playlist libraries are synced
+against your tracked playlists and channel libraries against your tracked
+channels, configured with two separate variables:
+
+- `YARRTUBE_PLEX_PLAYLIST_SECTION_ID` — the section id(s) of the Plex
+  library or libraries holding your **playlist** downloads
+  (`/videos/playlists`).
+- `YARRTUBE_PLEX_CHANNEL_SECTION_ID` — the section id(s) of the Plex
+  library or libraries holding your **channel** downloads
+  (`/videos/channels`).
+
+Each Plex library must hold **one kind only**. yarrtube matches videos to
+Plex items by YouTube ID, not by file path, so a single library mixing
+playlists and channels can't be told apart: a video that is in both a
+playlist and a subscribed channel would leak a stray channel collection into
+your playlist library (and vice versa). Point each variable at its own
+dedicated library. (Listing the same section id under both variables is
+allowed but reintroduces that leak for that library — don't, unless you know
+it holds only one kind.)
+
+Find a library's section id in either of two ways:
 
 - **Browser URL**: open the library in the Plex web app and look at the
   address bar — the number after `source=` is the section ID.
@@ -106,12 +126,13 @@ Two ways:
   # e.g. prints: 14,19
   ```
 
-If yarrtube's content is spread across **several Plex libraries** (e.g. one
-library per family member), collect every library's section ID — the
-variable takes a comma-separated list, and yarrtube keeps each library's
-collections in sync independently: a playlist's/channel's collection is
-created in whichever listed library its videos were scanned into.
-Libraries *not* in the list are never touched.
+Assign each library's section id to the variable for its kind. If content of
+one kind is spread across **several Plex libraries** (e.g. one library per
+family member), collect every one of them — each variable takes a
+comma-separated list, and yarrtube keeps each library's collections in sync
+independently: a playlist's/channel's collection is created in whichever
+listed library of the matching kind its videos were scanned into. Libraries
+*not* listed are never touched.
 
 ## 5. Configure yarrtube
 
@@ -121,15 +142,18 @@ Set the environment variables on the yarrtube container and restart it:
 environment:
   - YARRTUBE_PLEX_URL=http://<YOUR_PLEX_IP>:32400
   - YARRTUBE_PLEX_TOKEN=<YOUR_TOKEN>
-  # one section id, or a comma-separated list (e.g. 2,5) when yarrtube's
-  # content is spread across several libraries:
-  - YARRTUBE_PLEX_SECTION_ID=<YOUR_SECTION_ID>
+  # the playlist library section id(s), and the channel library section
+  # id(s); each takes one id or a comma-separated list (e.g. 2,5). Set
+  # whichever kinds you use — you can set just one of the two:
+  - YARRTUBE_PLEX_PLAYLIST_SECTION_ID=<YOUR_PLAYLIST_SECTION_ID>
+  - YARRTUBE_PLEX_CHANNEL_SECTION_ID=<YOUR_CHANNEL_SECTION_ID>
   # optional, defaults to 900 (15 minutes):
   # - YARRTUBE_PLEX_RECONCILE_INTERVAL_SECONDS=900
 ```
 
-The integration is **off unless all three are set** — without them yarrtube
-behaves exactly as before and never contacts Plex.
+The integration is **off unless `YARRTUBE_PLEX_URL`, `YARRTUBE_PLEX_TOKEN`
+and at least one of the two section variables are set** — without them
+yarrtube behaves exactly as before and never contacts Plex.
 
 On startup the log should show
 `scheduled recurring Plex collections reconcile task`; after each pass you

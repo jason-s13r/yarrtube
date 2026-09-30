@@ -71,16 +71,25 @@ if [[ -z "${YOUTUBE_API_KEY:-}" ]]; then
   echo "         Tracking a YouTube-linked playlist will fail; custom playlists still work." >&2
 fi
 
-# The Plex collections integration activates only when URL, token and
-# section id are all set (see doc/PLEX.md); warn on a partial configuration,
-# which yarrtube treats as disabled.
-PLEX_VARS_SET=0
-[[ -n "${YARRTUBE_PLEX_URL:-}" ]] && PLEX_VARS_SET=$((PLEX_VARS_SET + 1))
-[[ -n "${YARRTUBE_PLEX_TOKEN:-}" ]] && PLEX_VARS_SET=$((PLEX_VARS_SET + 1))
-[[ -n "${YARRTUBE_PLEX_SECTION_ID:-}" ]] && PLEX_VARS_SET=$((PLEX_VARS_SET + 1))
-if [[ "$PLEX_VARS_SET" -gt 0 && "$PLEX_VARS_SET" -lt 3 ]]; then
-  echo "warning: only some of YARRTUBE_PLEX_URL / YARRTUBE_PLEX_TOKEN / YARRTUBE_PLEX_SECTION_ID are set." >&2
-  echo "         The Plex collections integration needs all three and will stay disabled." >&2
+# The Plex collections integration activates only when the URL, the token
+# and at least one of the two kind-scoped section variables are set (see
+# doc/PLEX.md); warn on a partial configuration, which yarrtube treats as
+# disabled.
+PLEX_SECTION_SET=false
+if [[ -n "${YARRTUBE_PLEX_PLAYLIST_SECTION_ID:-}" || -n "${YARRTUBE_PLEX_CHANNEL_SECTION_ID:-}" ]]; then
+  PLEX_SECTION_SET=true
+fi
+PLEX_ANY_SET=false
+if [[ -n "${YARRTUBE_PLEX_URL:-}" || -n "${YARRTUBE_PLEX_TOKEN:-}" || "$PLEX_SECTION_SET" == true ]]; then
+  PLEX_ANY_SET=true
+fi
+PLEX_ENABLED=false
+if [[ -n "${YARRTUBE_PLEX_URL:-}" && -n "${YARRTUBE_PLEX_TOKEN:-}" && "$PLEX_SECTION_SET" == true ]]; then
+  PLEX_ENABLED=true
+fi
+if [[ "$PLEX_ANY_SET" == true && "$PLEX_ENABLED" == false ]]; then
+  echo "warning: only some of YARRTUBE_PLEX_URL / YARRTUBE_PLEX_TOKEN / YARRTUBE_PLEX_PLAYLIST_SECTION_ID / YARRTUBE_PLEX_CHANNEL_SECTION_ID are set." >&2
+  echo "         The Plex collections integration needs the URL, the token and at least one section variable, and will stay disabled." >&2
 fi
 
 if [[ "$SKIP_WEB_BUILD" == false ]]; then
@@ -108,10 +117,11 @@ echo "    YARRTUBE_DB_PATH=$DB_PATH"
 echo "    YARRTUBE_VIDEOS_PATH=$VIDEOS_PATH"
 echo "    YTDLP_PATH=$YTDLP_PATH"
 echo "    RUST_LOG=$RUST_LOG_VALUE"
-if [[ "$PLEX_VARS_SET" -eq 3 ]]; then
+if [[ "$PLEX_ENABLED" == true ]]; then
   echo "    YARRTUBE_PLEX_URL=$YARRTUBE_PLEX_URL"
   echo "    YARRTUBE_PLEX_TOKEN=<set>"
-  echo "    YARRTUBE_PLEX_SECTION_ID=$YARRTUBE_PLEX_SECTION_ID"
+  echo "    YARRTUBE_PLEX_PLAYLIST_SECTION_ID=${YARRTUBE_PLEX_PLAYLIST_SECTION_ID:-<not set>}"
+  echo "    YARRTUBE_PLEX_CHANNEL_SECTION_ID=${YARRTUBE_PLEX_CHANNEL_SECTION_ID:-<not set>}"
   echo "    YARRTUBE_PLEX_RECONCILE_INTERVAL_SECONDS=${YARRTUBE_PLEX_RECONCILE_INTERVAL_SECONDS:-<default: 900>}"
 else
   echo "    YARRTUBE_PLEX_*=<not set> (Plex collections integration disabled)"
@@ -128,6 +138,7 @@ exec env \
   RUST_LOG="$RUST_LOG_VALUE" \
   YARRTUBE_PLEX_URL="${YARRTUBE_PLEX_URL:-}" \
   YARRTUBE_PLEX_TOKEN="${YARRTUBE_PLEX_TOKEN:-}" \
-  YARRTUBE_PLEX_SECTION_ID="${YARRTUBE_PLEX_SECTION_ID:-}" \
+  YARRTUBE_PLEX_PLAYLIST_SECTION_ID="${YARRTUBE_PLEX_PLAYLIST_SECTION_ID:-}" \
+  YARRTUBE_PLEX_CHANNEL_SECTION_ID="${YARRTUBE_PLEX_CHANNEL_SECTION_ID:-}" \
   YARRTUBE_PLEX_RECONCILE_INTERVAL_SECONDS="${YARRTUBE_PLEX_RECONCILE_INTERVAL_SECONDS:-}" \
   cargo run -- serve

@@ -23,7 +23,7 @@ impl DeletePlexCollectionOnPlaylistDeleted {
 impl EventSubscriber for DeletePlexCollectionOnPlaylistDeleted {
     fn handle(&self, payload: &str) -> anyhow::Result<()> {
         let payload: PlaylistDeletedPayload = serde_json::from_str(payload)?;
-        self.deleter.delete(&payload.name)
+        self.deleter.delete_playlist_collection(&payload.name)
     }
 }
 
@@ -59,6 +59,7 @@ mod tests {
         ));
         let subscriber = DeletePlexCollectionOnPlaylistDeleted::new(PlexCollectionDeleter::new(
             vec!["1".to_string()],
+            vec![],
             plex_repository.clone(),
         ));
 
@@ -76,6 +77,51 @@ mod tests {
                 member_rating_keys: vec![],
             }]
         );
+    }
+
+    #[test]
+    fn it_should_not_delete_a_same_named_collection_in_a_channel_section() {
+        let plex_repository = Arc::new(
+            FakePlexCollectionRepository::with_items_and_collections(
+                "2",
+                vec![],
+                vec![FakePlexCollection {
+                    rating_key: "c1".to_string(),
+                    title: "Lofi beats".to_string(),
+                    member_rating_keys: vec![],
+                }],
+            )
+            .and_section(
+                "5",
+                vec![],
+                vec![FakePlexCollection {
+                    rating_key: "c2".to_string(),
+                    title: "Lofi beats".to_string(),
+                    member_rating_keys: vec![],
+                }],
+            ),
+        );
+        let subscriber = DeletePlexCollectionOnPlaylistDeleted::new(PlexCollectionDeleter::new(
+            vec!["2".to_string()],
+            vec!["5".to_string()],
+            plex_repository.clone(),
+        ));
+
+        let result = handle(
+            &subscriber,
+            r#"{"playlist_id": "PL1", "name": "Lofi beats", "path": "music/chill"}"#,
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            plex_repository.collections_in("5"),
+            vec![FakePlexCollection {
+                rating_key: "c2".to_string(),
+                title: "Lofi beats".to_string(),
+                member_rating_keys: vec![],
+            }]
+        );
+        assert_eq!(plex_repository.collections_in("2"), vec![]);
     }
 
     #[test]
@@ -102,6 +148,7 @@ mod tests {
         );
         let subscriber = DeletePlexCollectionOnPlaylistDeleted::new(PlexCollectionDeleter::new(
             vec!["2".to_string(), "5".to_string()],
+            vec![],
             plex_repository.clone(),
         ));
 
@@ -127,6 +174,7 @@ mod tests {
         ));
         let subscriber = DeletePlexCollectionOnPlaylistDeleted::new(PlexCollectionDeleter::new(
             vec!["1".to_string()],
+            vec![],
             plex_repository.clone(),
         ));
 

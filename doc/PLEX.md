@@ -84,6 +84,28 @@ Two ways:
     "http://<YOUR_PLEX_IP>:32400/library/sections?X-Plex-Token=<YOUR_TOKEN>"
   ```
 
+  The section ID is each library's `key`. To print just a `title → key`
+  table instead of reading the raw JSON, pipe it through `jq`:
+
+  ```bash
+  curl -sH "Accept: application/json" \
+    "http://<YOUR_PLEX_IP>:32400/library/sections?X-Plex-Token=<YOUR_TOKEN>" \
+    | jq -r '.MediaContainer.Directory[]
+             | "\(.key)\t\(.title)\t\(.Location[].path)"'
+  ```
+
+  If your yarrtube videos live under a known path, filter to just those
+  libraries and print the comma-separated list ready for the env var:
+
+  ```bash
+  curl -sH "Accept: application/json" \
+    "http://<YOUR_PLEX_IP>:32400/library/sections?X-Plex-Token=<YOUR_TOKEN>" \
+    | jq -r '[.MediaContainer.Directory[]
+              | select(any(.Location[]; .path | contains("/yarrtube/")))
+              | .key] | join(",")'
+  # e.g. prints: 14,19
+  ```
+
 If yarrtube's content is spread across **several Plex libraries** (e.g. one
 library per family member), collect every library's section ID — the
 variable takes a comma-separated list, and yarrtube keeps each library's

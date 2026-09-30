@@ -2,14 +2,17 @@ use crate::domain::task::{DeadLetteredTask, ScheduledTask, Task, TaskStatus};
 use crate::infrastructure::shared::system_clock::Clock;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-#[cfg(test)]
-use rusqlite::OptionalExtension;
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
 pub trait TaskRepository: Send + Sync {
+    /// Adds the task, unless it has an exclusivity key and a task of the same
+    /// type with the same key is already pending or running (then a no-op).
     fn schedule(&self, task: &Task, run_at: DateTime<Utc>) -> anyhow::Result<()>;
+    /// Atomically flips a pending task to running; `None` if it was no
+    /// longer pending.
+    fn claim(&self, id: i64, now: DateTime<Utc>) -> anyhow::Result<Option<ScheduledTask>>;
     /// Tasks ready to run now.
     fn list_eligible(&self) -> anyhow::Result<Vec<ScheduledTask>>;
     /// Every task still `running` from a previous, interrupted process.
@@ -74,6 +77,20 @@ fn row_to_scheduled_task(row: &Row) -> rusqlite::Result<ScheduledTask> {
 
 const SELECT_COLUMNS: &str =
     "id, task_type, payload, status, retries, run_at, created_at, updated_at, last_error";
+
+/// The `WHERE` clause guarding `schedule`'s insert: a task with an
+/// exclusivity key is only added if no task of its type for the same video
+/// is pending or running; any other task is always added.
+fn dedupe_predicate(task: &Task, payload: &str) -> &'static str {
+    match Task::exclusivity_key(task.task_type(), payload) {
+        Some(_) => {
+            "NOT EXISTS (SELECT 1 FROM tasks WHERE task_type = ?1
+               AND json_extract(payload, '$.video_id') = json_extract(?2, '$.video_id')
+               AND status IN ('pending', 'running'))"
+        }
+        None => "1",
+    }
+}
 
 pub struct SqliteTaskRepository {
     conn: Arc<Mutex<Connection>>,
@@ -166,21 +183,29 @@ impl TaskRepository for SqliteTaskRepository {
                 tracing::error!(task_type = task.task_type(), "database lock poisoned")
             })
             .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let payload = task.payload().to_string();
         let now = self.clock.now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO tasks (task_type, payload, status, retries, run_at, created_at, updated_at, last_error)
-             VALUES (?1, ?2, 'pending', 0, ?3, ?4, ?4, NULL)",
-            params![
-                task.task_type(),
-                task.payload().to_string(),
-                run_at.to_rfc3339(),
-                now
-            ],
-        )
-        .inspect_err(|e| {
-            tracing::error!(task_type = task.task_type(), error = %e, "failed to schedule task")
-        })
-        .context("failed to schedule task")?;
+        let inserted = conn
+            .execute(
+                &format!(
+                    "INSERT INTO tasks (task_type, payload, status, retries, run_at, created_at, updated_at, last_error)
+                     SELECT ?1, ?2, 'pending', 0, ?3, ?4, ?4, NULL
+                     WHERE {}",
+                    dedupe_predicate(task, &payload)
+                ),
+                params![task.task_type(), payload, run_at.to_rfc3339(), now],
+            )
+            .inspect_err(|e| {
+                tracing::error!(task_type = task.task_type(), error = %e, "failed to schedule task")
+            })
+            .context("failed to schedule task")?;
+        if inserted == 0 {
+            info!(
+                task_type = task.task_type(),
+                "task already pending or running for this video, not scheduling a duplicate"
+            );
+            return Ok(());
+        }
         info!(
             task_id = conn.last_insert_rowid(),
             task_type = task.task_type(),
@@ -188,6 +213,24 @@ impl TaskRepository for SqliteTaskRepository {
             "scheduled task"
         );
         Ok(())
+    }
+
+    fn claim(&self, id: i64, now: DateTime<Utc>) -> anyhow::Result<Option<ScheduledTask>> {
+        let conn = self
+            .conn
+            .lock()
+            .inspect_err(|_| tracing::error!(task_id = id, "database lock poisoned"))
+            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        conn.query_row(
+            &format!(
+                "UPDATE tasks SET status = 'running', updated_at = ?2 WHERE id = ?1 AND status = 'pending' RETURNING {SELECT_COLUMNS}"
+            ),
+            params![id, now.to_rfc3339()],
+            row_to_scheduled_task,
+        )
+        .optional()
+        .inspect_err(|e| tracing::error!(task_id = id, error = %e, "failed to claim task"))
+        .context("failed to claim task")
     }
 
     fn list_eligible(&self) -> anyhow::Result<Vec<ScheduledTask>> {
@@ -623,5 +666,116 @@ mod tests {
         }
 
         assert!(repo.list_non_completed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn it_should_not_schedule_a_duplicate_download_for_the_same_video() {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let repo = repo_with_clock(now);
+        let download = download_task("rec1");
+
+        repo.schedule(&download, now).unwrap();
+        repo.schedule(&download, now).unwrap();
+
+        assert_eq!(
+            repo.list_non_completed().unwrap(),
+            vec![pending_task(1, &download, now, now)]
+        );
+    }
+
+    #[test]
+    fn it_should_not_schedule_a_duplicate_thumbnail_fetch_for_the_same_video() {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let repo = repo_with_clock(now);
+        let fetch_thumbnail = Task::FetchThumbnail {
+            video_id: "rec1".to_string(),
+            output_dir: "/videos/my-playlist".to_string(),
+        };
+
+        repo.schedule(&fetch_thumbnail, now).unwrap();
+        repo.schedule(&fetch_thumbnail, now).unwrap();
+
+        assert_eq!(
+            repo.list_non_completed().unwrap(),
+            vec![pending_task(1, &fetch_thumbnail, now, now)]
+        );
+    }
+
+    #[test]
+    fn it_should_schedule_a_download_for_another_video() {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let repo = repo_with_clock(now);
+
+        repo.schedule(&download_task("rec1"), now).unwrap();
+        repo.schedule(&download_task("rec2"), now).unwrap();
+
+        assert_eq!(
+            repo.list_non_completed().unwrap(),
+            vec![
+                pending_task(1, &download_task("rec1"), now, now),
+                pending_task(2, &download_task("rec2"), now, now),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_schedule_duplicates_of_tasks_without_a_video() {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let repo = repo_with_clock(now);
+
+        repo.schedule(&task(), now).unwrap();
+        repo.schedule(&task(), now).unwrap();
+
+        assert_eq!(
+            repo.list_non_completed().unwrap(),
+            vec![
+                pending_task(1, &task(), now, now),
+                pending_task(2, &task(), now, now),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_claim_a_pending_task() {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let later = now + chrono::Duration::seconds(30);
+        let repo = repo_with_clock(now);
+        repo.schedule(&task(), now).unwrap();
+
+        let claimed = repo.claim(1, later).unwrap();
+
+        let running = ScheduledTask {
+            status: TaskStatus::Running,
+            updated_at: later,
+            ..pending_task(1, &task(), now, now)
+        };
+        assert_eq!(claimed, Some(running.clone()));
+        assert_eq!(repo.list_non_completed().unwrap(), vec![running]);
+    }
+
+    #[test]
+    fn it_should_not_claim_a_task_already_running() {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let later = now + chrono::Duration::seconds(30);
+        let repo = repo_with_clock(now);
+        repo.schedule(&task(), now).unwrap();
+        repo.update(&pending_task(1, &task(), now, now).start(now))
+            .unwrap();
+
+        let claimed = repo.claim(1, later).unwrap();
+
+        assert_eq!(claimed, None);
+        assert_eq!(
+            repo.list_non_completed().unwrap(),
+            vec![pending_task(1, &task(), now, now).start(now)]
+        );
+    }
+
+    fn download_task(video_id: &str) -> Task {
+        Task::DownloadVideo {
+            video_id: video_id.to_string(),
+            quality: "high".to_string(),
+            output_dir: "/videos/my-playlist".to_string(),
+        }
     }
 }

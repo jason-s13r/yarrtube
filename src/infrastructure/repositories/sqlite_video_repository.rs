@@ -40,6 +40,23 @@ pub trait VideoRepository: Send + Sync {
     /// which is a plain insert-or-replace, `update` only touches a row that
     /// still exists.
     fn update(&self, video: &Video) -> anyhow::Result<()>;
+    /// Writes only `title` (and `updated_at`), leaving the download's fields
+    /// untouched even if they changed since the caller read the video.
+    fn update_title(
+        &self,
+        id: &VideoRecordId,
+        title: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
+    /// Writes only `thumbnail_filename` (and `updated_at`), leaving the
+    /// download's fields untouched even if they changed since the caller
+    /// read the video.
+    fn update_thumbnail(
+        &self,
+        id: &VideoRecordId,
+        thumbnail_filename: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
     fn delete(&self, id: &VideoRecordId) -> anyhow::Result<()>;
     /// Every stored copy of a YouTube video, across all playlists/channels.
     fn find_by_youtube_id(&self, youtube_id: &VideoId) -> anyhow::Result<Vec<Video>>;
@@ -199,6 +216,50 @@ impl VideoRepository for SqliteVideoRepository {
             tracing::error!(video_id = %video.id, error = %e, "failed to update video")
         })
         .context("failed to update video")?;
+        Ok(())
+    }
+
+    fn update_title(
+        &self,
+        id: &VideoRecordId,
+        title: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .inspect_err(|_| tracing::error!(video_id = %id, "database lock poisoned"))
+            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        conn.execute(
+            "UPDATE videos SET title = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id.as_str(), title, now.to_rfc3339()],
+        )
+        .inspect_err(
+            |e| tracing::error!(video_id = %id, error = %e, "failed to update video title"),
+        )
+        .context("failed to update video title")?;
+        Ok(())
+    }
+
+    fn update_thumbnail(
+        &self,
+        id: &VideoRecordId,
+        thumbnail_filename: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .inspect_err(|_| tracing::error!(video_id = %id, "database lock poisoned"))
+            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        conn.execute(
+            "UPDATE videos SET thumbnail_filename = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id.as_str(), thumbnail_filename, now.to_rfc3339()],
+        )
+        .inspect_err(
+            |e| tracing::error!(video_id = %id, error = %e, "failed to update video thumbnail"),
+        )
+        .context("failed to update video thumbnail")?;
         Ok(())
     }
 
@@ -511,6 +572,47 @@ mod tests {
         let found = repo.find(&original.id).unwrap().unwrap();
         assert_eq!(found.status, VideoStatus::InProgress);
         assert_eq!(found.updated_at, later);
+    }
+
+    #[test]
+    fn it_should_update_only_the_title() {
+        let repo = repo();
+        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let later = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let original = video("First", now).start_download(now);
+        repo.save(&original).unwrap();
+
+        repo.update_title(&original.id, "Renamed", later).unwrap();
+
+        assert_eq!(
+            repo.find(&original.id).unwrap(),
+            Some(Video {
+                title: "Renamed".to_string(),
+                updated_at: later,
+                ..original
+            })
+        );
+    }
+
+    #[test]
+    fn it_should_update_only_the_thumbnail() {
+        let repo = repo();
+        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let later = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let original = video("First", now).start_download(now);
+        repo.save(&original).unwrap();
+
+        repo.update_thumbnail(&original.id, "First/First.jpg", later)
+            .unwrap();
+
+        assert_eq!(
+            repo.find(&original.id).unwrap(),
+            Some(Video {
+                thumbnail_filename: Some("First/First.jpg".to_string()),
+                updated_at: later,
+                ..original
+            })
+        );
     }
 
     #[test]

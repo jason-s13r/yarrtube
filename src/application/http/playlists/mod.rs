@@ -939,7 +939,17 @@ mod tests {
                 .unwrap(),
             playlist_videos_after_first_reconcile
         );
-        assert_eq!(task_repository.list_non_completed().unwrap(), vec![]);
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![pending_task(
+                1,
+                &Task::FetchThumbnail {
+                    video_id: videos_after_first_reconcile[0].id.as_str().to_string(),
+                    output_dir: "/videos/music/chill".to_string(),
+                },
+                fixed_timestamp(),
+            )]
+        );
         assert_eq!(
             event_repository.list_eligible().unwrap(),
             events_after_first_reconcile
@@ -1068,6 +1078,7 @@ mod tests {
         let thumbnail_fetcher = Arc::new(ThumbnailFetcher::new(
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::default()),
+            task_repository.clone(),
             Arc::new(FixedClock(fixed_timestamp())),
         ));
         PlaylistVideoReconciler::new(
@@ -1093,6 +1104,10 @@ mod tests {
     /// (see `any_playlist_creator`).
     fn any_playlist_video_reconciler() -> PlaylistVideoReconciler {
         let video_repository = Arc::new(SqliteVideoRepository::new(unused_connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            Arc::new(std::sync::Mutex::new(unused_connection())),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
         PlaylistVideoReconciler::new(
             Arc::new(SqlitePlaylistRepository::new(unused_connection())),
             video_repository.clone(),
@@ -1103,14 +1118,12 @@ mod tests {
             Arc::new(FakeYoutubeMetadataRepository::default()),
             Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
             unused_event_publisher(),
-            Arc::new(SqliteTaskRepository::new(
-                Arc::new(Mutex::new(unused_connection())),
-                Arc::new(FixedClock(fixed_timestamp())),
-            )),
+            task_repository.clone(),
             Arc::new(FakeVideoFileRepository::default()),
             Arc::new(ThumbnailFetcher::new(
                 video_repository,
                 Arc::new(FakeVideoDownloaderRepository::default()),
+                task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),

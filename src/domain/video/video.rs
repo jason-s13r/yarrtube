@@ -1,5 +1,6 @@
 use super::playback_position::PlaybackPosition;
 use super::video_duration::VideoDuration;
+use super::video_filename::video_folder_candidates;
 use super::video_id::VideoId;
 use super::video_record_id::VideoRecordId;
 use super::video_status::VideoStatus;
@@ -116,7 +117,9 @@ impl Video {
     /// Records a thumbnail fetched independently of, and ahead of, the
     /// video's full download — see the `video-thumbnails` capability.
     /// Touches only `thumbnail_filename`/`updated_at`, leaving `status`,
-    /// `filename`, and `quality` exactly as they were.
+    /// `filename`, and `quality` exactly as they were. Stored through
+    /// `VideoRepository::update_thumbnail`, which writes only that column.
+    #[cfg(test)]
     pub fn with_thumbnail(self, thumbnail_filename: impl Into<String>, now: DateTime<Utc>) -> Self {
         Self {
             thumbnail_filename: Some(thumbnail_filename.into()),
@@ -225,6 +228,23 @@ impl Video {
             && self
                 .last_errored_at
                 .is_none_or(|errored_at| now - errored_at >= ERRORED_RECOVERY_COOLDOWN)
+    }
+
+    /// The folders a download or thumbnail fetch of this video may be writing
+    /// into right now. Until the video is downloaded its folder isn't
+    /// recorded (a thumbnail fetch records it only once it finishes), so it
+    /// is predicted from the title, and also from `previous_title` when the
+    /// video was just renamed: a download started before the rename still
+    /// writes under the old name. Empty once the download recorded its
+    /// folder.
+    pub fn unrecorded_folder_candidates(&self, previous_title: Option<&str>) -> Vec<String> {
+        match self.filename {
+            Some(_) => Vec::new(),
+            None => std::iter::once(self.title.as_str())
+                .chain(previous_title)
+                .flat_map(|title| video_folder_candidates(title, &self.youtube_id))
+                .collect(),
+        }
     }
 
     /// The recorded duration, else the reported one. The reported one is

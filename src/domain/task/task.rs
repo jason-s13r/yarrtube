@@ -1,4 +1,5 @@
 use super::errors::TaskError;
+use super::task_lane::TaskLane;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -29,6 +30,10 @@ pub enum Task {
         path: String,
     },
     UpdateYtdlp,
+    FetchThumbnail {
+        video_id: String,
+        output_dir: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +75,12 @@ struct DeleteChannelFilesPayload {
 #[derive(Debug, Deserialize)]
 struct UpdateYtdlpPayload {}
 
+#[derive(Debug, Deserialize)]
+struct FetchThumbnailPayload {
+    video_id: String,
+    output_dir: String,
+}
+
 impl Task {
     pub fn task_type(&self) -> &'static str {
         match self {
@@ -80,6 +91,7 @@ impl Task {
             Self::DeletePlaylistFiles { .. } => "delete_playlist_files",
             Self::DeleteChannelFiles { .. } => "delete_channel_files",
             Self::UpdateYtdlp => "update_ytdlp",
+            Self::FetchThumbnail { .. } => "fetch_thumbnail",
         }
     }
 
@@ -110,6 +122,10 @@ impl Task {
                 "path": path,
             }),
             Self::UpdateYtdlp => json!({}),
+            Self::FetchThumbnail {
+                video_id,
+                output_dir,
+            } => json!({ "video_id": video_id, "output_dir": output_dir }),
         }
     }
 
@@ -184,6 +200,42 @@ impl Task {
         serde_json::from_str::<UpdateYtdlpPayload>(payload)
             .map_err(|e| TaskError(format!("invalid update_ytdlp payload: {e}")))?;
         Ok(())
+    }
+
+    /// Decodes a `fetch_thumbnail` task's raw JSON payload, as handed to a
+    /// `TaskHandler`, back into the video's surrogate ID and the output
+    /// directory it targets.
+    pub fn decode_fetch_thumbnail_payload(payload: &str) -> Result<(String, String), TaskError> {
+        let parsed: FetchThumbnailPayload = serde_json::from_str(payload)
+            .map_err(|e| TaskError(format!("invalid fetch_thumbnail payload: {e}")))?;
+        Ok((parsed.video_id, parsed.output_dir))
+    }
+
+    /// The executor lane a task of `task_type` runs in. Unknown types fall
+    /// into `Light`.
+    pub fn lane_for(task_type: &str) -> TaskLane {
+        match task_type {
+            "download_video" => TaskLane::Download,
+            "fetch_thumbnail" => TaskLane::Thumbnail,
+            "update_ytdlp" => TaskLane::Exclusive,
+            _ => TaskLane::Light,
+        }
+    }
+
+    /// `Some("video:<id>")` for `download_video` and `fetch_thumbnail`: two
+    /// tasks sharing a key never run at the same time, and a task with a key
+    /// is not scheduled twice while one is pending or running.
+    pub fn exclusivity_key(task_type: &str, payload: &str) -> Option<String> {
+        let video_id = match task_type {
+            "download_video" => Self::decode_download_video_payload(payload)
+                .ok()
+                .map(|(video_id, _, _)| video_id),
+            "fetch_thumbnail" => Self::decode_fetch_thumbnail_payload(payload)
+                .ok()
+                .map(|(video_id, _)| video_id),
+            _ => None,
+        }?;
+        Some(format!("video:{video_id}"))
     }
 }
 
@@ -405,5 +457,68 @@ mod tests {
     #[test]
     fn it_should_reject_a_malformed_update_ytdlp_payload() {
         assert!(Task::decode_update_ytdlp_payload("not json").is_err());
+    }
+
+    #[test]
+    fn it_should_map_task_types_to_lanes() {
+        let lanes: Vec<TaskLane> = [
+            "download_video",
+            "fetch_thumbnail",
+            "update_ytdlp",
+            "reconcile_playlist",
+            "reconcile_channel",
+            "delete_video_file",
+            "delete_playlist_files",
+            "delete_channel_files",
+            "unknown",
+        ]
+        .into_iter()
+        .map(Task::lane_for)
+        .collect();
+
+        assert_eq!(
+            lanes,
+            vec![
+                TaskLane::Download,
+                TaskLane::Thumbnail,
+                TaskLane::Exclusive,
+                TaskLane::Light,
+                TaskLane::Light,
+                TaskLane::Light,
+                TaskLane::Light,
+                TaskLane::Light,
+                TaskLane::Light,
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_key_video_tasks_by_video_id() {
+        let download = Task::DownloadVideo {
+            video_id: "rec1".to_string(),
+            quality: "high".to_string(),
+            output_dir: "/videos/music".to_string(),
+        };
+        let fetch_thumbnail = Task::FetchThumbnail {
+            video_id: "rec2".to_string(),
+            output_dir: "/videos/music".to_string(),
+        };
+        let reconcile = Task::ReconcilePlaylist {
+            playlist_id: "PL1".to_string(),
+        };
+
+        let keys: Vec<Option<String>> = [download, fetch_thumbnail, reconcile]
+            .iter()
+            .map(|task| Task::exclusivity_key(task.task_type(), &task.payload().to_string()))
+            .collect();
+
+        assert_eq!(
+            keys,
+            vec![
+                Some("video:rec1".to_string()),
+                Some("video:rec2".to_string()),
+                None,
+            ]
+        );
     }
 }

@@ -37,7 +37,7 @@ mod tests {
     use crate::domain::shared::Quality;
     use crate::domain::task::{ScheduledTask, TaskStatus};
     use crate::domain::video::Video;
-    use crate::domain::video::{VideoId, VideoStatus};
+    use crate::domain::video::{VideoId, VideoRecordId, VideoStatus};
     use crate::domain::video_metadata::VideoMetadata;
     use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
     use crate::infrastructure::repositories::sqlite_playlist_repository::{
@@ -645,6 +645,251 @@ mod tests {
     }
 
     #[test]
+    fn it_should_keep_the_folder_of_a_download_in_progress() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.shared_connection(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
+            "My Video".to_string(),
+        ]));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = my_video().start_download(fixed_timestamp());
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            &video,
+            0,
+        );
+        let task = ReconcilePlaylistTask::new(playlist_video_reconciler(
+            &db,
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository.clone(),
+            vec![member_playlist_item()],
+            task_repository.clone(),
+            video_file_repository.clone(),
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
+        assert_eq!(video_repository.list().unwrap(), vec![video]);
+    }
+
+    #[test]
+    fn it_should_keep_the_folder_of_a_thumbnail_fetch_in_progress() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.shared_connection(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
+            "My Video".to_string(),
+        ]));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = my_video();
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            &video,
+            0,
+        );
+        let task = ReconcilePlaylistTask::new(playlist_video_reconciler(
+            &db,
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository.clone(),
+            vec![member_playlist_item()],
+            task_repository.clone(),
+            video_file_repository.clone(),
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
+        assert_eq!(video_repository.list().unwrap(), vec![video]);
+    }
+
+    #[test]
+    fn it_should_keep_the_folder_of_a_download_in_progress_if_video_renamed() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.shared_connection(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
+            "My Video".to_string(),
+        ]));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = my_video().start_download(fixed_timestamp());
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            &video,
+            0,
+        );
+        let task = ReconcilePlaylistTask::new(playlist_video_reconciler(
+            &db,
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository.clone(),
+            vec![playlist_item("vid1", "Renamed", 0)],
+            task_repository.clone(),
+            video_file_repository.clone(),
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![Video {
+                title: "Renamed".to_string(),
+                ..video
+            }]
+        );
+    }
+
+    #[test]
+    fn it_should_keep_the_suffixed_folder_of_a_download_in_progress() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.shared_connection(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
+            "My Video [vid1]".to_string(),
+        ]));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = my_video().start_download(fixed_timestamp());
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            &video,
+            0,
+        );
+        let task = ReconcilePlaylistTask::new(playlist_video_reconciler(
+            &db,
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository.clone(),
+            vec![member_playlist_item()],
+            task_repository.clone(),
+            video_file_repository.clone(),
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
+        assert_eq!(video_repository.list().unwrap(), vec![video]);
+    }
+
+    #[test]
+    fn it_should_keep_the_folder_of_a_download_being_retried() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.shared_connection(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
+            "My Video".to_string(),
+        ]));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = my_video()
+            .start_download(fixed_timestamp())
+            .mark_errored_retrying(fixed_timestamp());
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            &video,
+            0,
+        );
+        let task = ReconcilePlaylistTask::new(playlist_video_reconciler(
+            &db,
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository.clone(),
+            vec![member_playlist_item()],
+            task_repository.clone(),
+            video_file_repository.clone(),
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
+        assert_eq!(video_repository.list().unwrap(), vec![video]);
+    }
+
+    #[test]
+    fn it_should_still_delete_a_folder_no_video_accounts_for() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.shared_connection(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(vec![
+            "My Video".to_string(),
+            "Other".to_string(),
+        ]));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = my_video().start_download(fixed_timestamp());
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            &video,
+            0,
+        );
+        let task = ReconcilePlaylistTask::new(playlist_video_reconciler(
+            &db,
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository.clone(),
+            vec![member_playlist_item()],
+            task_repository.clone(),
+            video_file_repository.clone(),
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *video_file_repository.deleted_calls.lock().unwrap(),
+            vec![deleted("Other")]
+        );
+    }
+
+    #[test]
     fn it_should_retry_permanently_errored_videos() {
         let db = TestDatabase::new();
         let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
@@ -787,16 +1032,10 @@ mod tests {
         let result = run(&task, &payload_for("PL1"));
 
         assert_eq!(result, Ok(()));
-        assert_eq!(
-            video_repository.list().unwrap(),
-            vec![Video {
-                updated_at: fixed_timestamp(),
-                ..video
-            }]
-        );
+        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
         assert_eq!(
             task_repository.list_non_completed().unwrap(),
-            vec![next_reconcile(1)]
+            vec![fetch_thumbnail_task(1, &video.id), next_reconcile(2)]
         );
     }
 
@@ -959,10 +1198,10 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(*video_file_repository.deleted_calls.lock().unwrap(), vec![]);
-        assert_eq!(video_repository.list().unwrap(), vec![video]);
+        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
         assert_eq!(
             task_repository.list_non_completed().unwrap(),
-            vec![next_reconcile(1)]
+            vec![fetch_thumbnail_task(1, &video.id), next_reconcile(2)]
         );
     }
 
@@ -1048,6 +1287,7 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 Arc::new(FakeVideoDownloaderRepository::default()),
+                task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1074,10 +1314,24 @@ mod tests {
                 fixed_timestamp(),
             ))
         );
-        assert_eq!(video_repository.list().unwrap(), vec![video]);
+        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
         assert_eq!(
             task_repository.list_non_completed().unwrap(),
-            vec![next_reconcile(1)]
+            vec![
+                pending_task(
+                    1,
+                    &Task::FetchThumbnail {
+                        video_id: video.id.as_str().to_string(),
+                        output_dir: videos_root
+                            .path()
+                            .join("my-playlist")
+                            .to_string_lossy()
+                            .to_string(),
+                    },
+                    fixed_timestamp(),
+                ),
+                next_reconcile(2),
+            ]
         );
     }
 
@@ -1138,11 +1392,12 @@ mod tests {
                 db.shared_connection(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
-            task_repository,
+            task_repository.clone(),
             Arc::new(FakeVideoFileRepository::with_file_exists(true)),
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 Arc::new(FakeVideoDownloaderRepository::default()),
+                task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1160,7 +1415,7 @@ mod tests {
     }
 
     #[test]
-    fn it_should_fetch_thumbnails_of_new_videos() {
+    fn it_should_not_fetch_thumbnails_when_adding_new_videos() {
         let db = TestDatabase::new();
         let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
         let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
@@ -1181,7 +1436,10 @@ mod tests {
             video_repository.clone(),
             playlist_video_repository,
             Arc::new(FakeYoutubePlaylistItemsRepository {
-                videos: Mutex::new(vec![member_playlist_item()]),
+                videos: Mutex::new(vec![
+                    playlist_item("vid1", "One", 0),
+                    playlist_item("vid2", "Two", 1),
+                ]),
             }),
             Arc::new(FakeYoutubeMetadataRepository::default()),
             Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
@@ -1189,11 +1447,12 @@ mod tests {
                 db.shared_connection(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
-            task_repository,
+            task_repository.clone(),
             Arc::new(FakeVideoFileRepository::default()),
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1205,100 +1464,47 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         let videos = video_repository.list().unwrap();
-        let video_id = videos[0].id.clone();
+        let (first_id, second_id) = (videos[0].id.clone(), videos[1].id.clone());
         assert_eq!(
             videos,
-            vec![Video {
-                id: video_id.clone(),
-                ..my_video().with_thumbnail("My Video/My Video.jpg", fixed_timestamp())
-            }]
+            vec![
+                Video {
+                    id: first_id.clone(),
+                    ..Video::create(VideoId::new("vid1").unwrap(), "One", fixed_timestamp())
+                },
+                Video {
+                    id: second_id.clone(),
+                    ..Video::create(VideoId::new("vid2").unwrap(), "Two", fixed_timestamp())
+                },
+            ]
         );
         assert_eq!(
             *video_downloader_repository.thumbnail_calls.lock().unwrap(),
-            vec![thumbnail_call(None)]
+            vec![]
         );
         assert_eq!(
             event_repository.list_eligible().unwrap(),
-            vec![pending_event(
-                1,
-                DomainEvent::VideoAddedToPlaylist {
-                    playlist_id: "PL1".to_string(),
-                    video_id: video_id.as_str().to_string(),
-                }
-            )]
+            vec![
+                pending_event(
+                    1,
+                    DomainEvent::VideoAddedToPlaylist {
+                        playlist_id: "PL1".to_string(),
+                        video_id: first_id.as_str().to_string(),
+                    }
+                ),
+                pending_event(
+                    2,
+                    DomainEvent::VideoAddedToPlaylist {
+                        playlist_id: "PL1".to_string(),
+                        video_id: second_id.as_str().to_string(),
+                    }
+                ),
+            ]
         );
     }
 
     #[test]
-    fn it_should_add_new_videos_if_thumbnail_fetch_fails() {
-        let db = TestDatabase::new();
-        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
-        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
-        let playlist_video_repository =
-            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
-        let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.shared_connection(),
-            Arc::new(FixedClock(fixed_timestamp())),
-        ));
-        let event_repository = SqliteEventRepository::new(db.shared_connection());
-        let video_downloader_repository =
-            Arc::new(FakeVideoDownloaderRepository::default().with_thumbnail_error());
-        playlist_repository.insert(&playlist("PL1")).unwrap();
-        let task = ReconcilePlaylistTask::new(PlaylistVideoReconciler::new(
-            playlist_repository,
-            video_repository.clone(),
-            playlist_video_repository,
-            Arc::new(FakeYoutubePlaylistItemsRepository {
-                videos: Mutex::new(vec![member_playlist_item()]),
-            }),
-            Arc::new(FakeYoutubeMetadataRepository::default()),
-            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
-            Arc::new(SqliteEventPublisher::new(
-                db.shared_connection(),
-                Arc::new(FixedClock(fixed_timestamp())),
-            )),
-            task_repository,
-            Arc::new(FakeVideoFileRepository::default()),
-            Arc::new(ThumbnailFetcher::new(
-                video_repository.clone(),
-                video_downloader_repository.clone(),
-                Arc::new(FixedClock(fixed_timestamp())),
-            )),
-            Arc::new(FixedClock(fixed_timestamp())),
-            3600,
-            "/videos",
-        ));
-
-        let result = run(&task, &payload_for("PL1"));
-
-        assert_eq!(result, Ok(()));
-        let videos = video_repository.list().unwrap();
-        let video_id = videos[0].id.clone();
-        assert_eq!(
-            videos,
-            vec![Video {
-                id: video_id.clone(),
-                ..my_video()
-            }]
-        );
-        assert_eq!(
-            *video_downloader_repository.thumbnail_calls.lock().unwrap(),
-            vec![thumbnail_call(None), thumbnail_call(None)]
-        );
-        assert_eq!(
-            event_repository.list_eligible().unwrap(),
-            vec![pending_event(
-                1,
-                DomainEvent::VideoAddedToPlaylist {
-                    playlist_id: "PL1".to_string(),
-                    video_id: video_id.as_str().to_string(),
-                }
-            )]
-        );
-    }
-
-    #[test]
-    fn it_should_fetch_missing_thumbnails() {
+    fn it_should_schedule_a_thumbnail_fetch_for_a_video_missing_one() {
         let db = TestDatabase::new();
         let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
         let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
@@ -1333,11 +1539,112 @@ mod tests {
                 db.shared_connection(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
-            task_repository,
+            task_repository.clone(),
             Arc::new(FakeVideoFileRepository::default()),
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                task_repository.clone(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+            3600,
+            "/videos",
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
+        assert_eq!(
+            *video_downloader_repository.thumbnail_calls.lock().unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![fetch_thumbnail_task(1, &video.id), next_reconcile(2)]
+        );
+    }
+
+    #[test]
+    fn it_should_not_schedule_a_thumbnail_fetch_for_a_video_added_in_the_same_pass() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.shared_connection(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let task = ReconcilePlaylistTask::new(playlist_video_reconciler(
+            &db,
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository.clone(),
+            vec![playlist_item("vid1", "One", 0)],
+            task_repository.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![next_reconcile(1)]
+        );
+    }
+
+    #[test]
+    fn it_should_not_schedule_a_second_thumbnail_fetch_if_one_is_queued() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.shared_connection(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video_downloader_repository = Arc::new(FakeVideoDownloaderRepository::default());
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = my_video();
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            &video,
+            0,
+        );
+        task_repository
+            .schedule(
+                &Task::FetchThumbnail {
+                    video_id: video.id.as_str().to_string(),
+                    output_dir: "/videos/my-playlist".to_string(),
+                },
+                fixed_timestamp(),
+            )
+            .unwrap();
+        let task = ReconcilePlaylistTask::new(PlaylistVideoReconciler::new(
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository,
+            Arc::new(FakeYoutubePlaylistItemsRepository {
+                videos: Mutex::new(vec![member_playlist_item()]),
+            }),
+            Arc::new(FakeYoutubeMetadataRepository::default()),
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
+            Arc::new(SqliteEventPublisher::new(
+                db.shared_connection(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            task_repository.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(ThumbnailFetcher::new(
+                video_repository.clone(),
+                video_downloader_repository.clone(),
+                task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1349,17 +1656,13 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(
-            video_repository.list().unwrap(),
-            vec![video.with_thumbnail("My Video/My Video.jpg", fixed_timestamp())]
-        );
-        assert_eq!(
-            *video_downloader_repository.thumbnail_calls.lock().unwrap(),
-            vec![thumbnail_call(None)]
+            task_repository.list_non_completed().unwrap(),
+            vec![fetch_thumbnail_task(1, &video.id), next_reconcile(2)]
         );
     }
 
     #[test]
-    fn it_should_fetch_missing_thumbnails_into_the_video_folder() {
+    fn it_should_not_schedule_a_thumbnail_fetch_for_a_video_being_downloaded() {
         let db = TestDatabase::new();
         let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
         let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
@@ -1369,12 +1672,9 @@ mod tests {
             db.shared_connection(),
             Arc::new(FixedClock(fixed_timestamp())),
         ));
-        let video_downloader_repository = Arc::new(
-            FakeVideoDownloaderRepository::default()
-                .with_thumbnail_result(Some(fetched_thumbnail())),
-        );
+        let video_downloader_repository = Arc::new(FakeVideoDownloaderRepository::default());
         playlist_repository.insert(&playlist("PL1")).unwrap();
-        let video = downloaded_video("My Video/My Video.mp4", None);
+        let video = my_video().start_download(fixed_timestamp());
         save_playlist_video(
             video_repository.as_ref(),
             playlist_video_repository.as_ref(),
@@ -1394,11 +1694,12 @@ mod tests {
                 db.shared_connection(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
-            task_repository,
-            Arc::new(FakeVideoFileRepository::with_file_exists(true)),
+            task_repository.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1409,13 +1710,10 @@ mod tests {
         let result = run(&task, &payload_for("PL1"));
 
         assert_eq!(result, Ok(()));
+        assert_eq!(video_repository.list().unwrap(), vec![video]);
         assert_eq!(
-            video_repository.list().unwrap(),
-            vec![video.with_thumbnail("My Video/My Video.jpg", fixed_timestamp())]
-        );
-        assert_eq!(
-            *video_downloader_repository.thumbnail_calls.lock().unwrap(),
-            vec![thumbnail_call(Some("My Video"))]
+            task_repository.list_non_completed().unwrap(),
+            vec![next_reconcile(1)]
         );
     }
 
@@ -1452,11 +1750,12 @@ mod tests {
                 db.shared_connection(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
-            task_repository,
+            task_repository.clone(),
             Arc::new(FakeVideoFileRepository::with_file_exists(true)),
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1475,7 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn it_should_not_fetch_thumbnails_of_videos_being_redownloaded() {
+    fn it_should_not_schedule_a_thumbnail_fetch_for_a_video_being_redownloaded() {
         let db = TestDatabase::new();
         let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
         let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
@@ -1515,6 +1814,7 @@ mod tests {
             Arc::new(ThumbnailFetcher::new(
                 video_repository.clone(),
                 video_downloader_repository.clone(),
+                task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1550,64 +1850,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn it_should_not_fetch_thumbnails_of_videos_downloading() {
-        let db = TestDatabase::new();
-        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
-        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
-        let playlist_video_repository =
-            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
-        let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.shared_connection(),
-            Arc::new(FixedClock(fixed_timestamp())),
-        ));
-        let video_downloader_repository = Arc::new(
-            FakeVideoDownloaderRepository::default()
-                .with_thumbnail_result(Some(fetched_thumbnail())),
-        );
-        playlist_repository.insert(&playlist("PL1")).unwrap();
-        let video = my_video().start_download(fixed_timestamp());
-        save_playlist_video(
-            video_repository.as_ref(),
-            playlist_video_repository.as_ref(),
-            &video,
-            0,
-        );
-        let task = ReconcilePlaylistTask::new(PlaylistVideoReconciler::new(
-            playlist_repository,
-            video_repository.clone(),
-            playlist_video_repository,
-            Arc::new(FakeYoutubePlaylistItemsRepository {
-                videos: Mutex::new(vec![member_playlist_item()]),
-            }),
-            Arc::new(FakeYoutubeMetadataRepository::default()),
-            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
-            Arc::new(SqliteEventPublisher::new(
-                db.shared_connection(),
-                Arc::new(FixedClock(fixed_timestamp())),
-            )),
-            task_repository,
-            Arc::new(FakeVideoFileRepository::default()),
-            Arc::new(ThumbnailFetcher::new(
-                video_repository.clone(),
-                video_downloader_repository.clone(),
-                Arc::new(FixedClock(fixed_timestamp())),
-            )),
-            Arc::new(FixedClock(fixed_timestamp())),
-            3600,
-            "/videos",
-        ));
-
-        let result = run(&task, &payload_for("PL1"));
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(
-            *video_downloader_repository.thumbnail_calls.lock().unwrap(),
-            vec![]
-        );
-        assert_eq!(video_repository.list().unwrap(), vec![video]);
-    }
-
     /// Builds a reconciler around the repositories and fakes a test seeds,
     /// configures or asserts; the remaining ports (YouTube metadata, video
     /// metadata, thumbnails) are ones these tests don't observe — the ones
@@ -1624,6 +1866,7 @@ mod tests {
         let thumbnail_fetcher = Arc::new(ThumbnailFetcher::new(
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::default()),
+            task_repository.clone(),
             Arc::new(FixedClock(fixed_timestamp())),
         ));
         PlaylistVideoReconciler::new(
@@ -1639,7 +1882,7 @@ mod tests {
                 db.shared_connection(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
-            task_repository,
+            task_repository.clone(),
             video_file_repository,
             thumbnail_fetcher,
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1654,6 +1897,10 @@ mod tests {
     /// passing.
     fn any_task() -> ReconcilePlaylistTask {
         let video_repository = Arc::new(SqliteVideoRepository::new(unused_connection()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            Arc::new(std::sync::Mutex::new(unused_connection())),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
         ReconcilePlaylistTask::new(PlaylistVideoReconciler::new(
             Arc::new(SqlitePlaylistRepository::new(unused_connection())),
             video_repository.clone(),
@@ -1667,14 +1914,12 @@ mod tests {
                 Arc::new(Mutex::new(unused_connection())),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
-            Arc::new(SqliteTaskRepository::new(
-                Arc::new(Mutex::new(unused_connection())),
-                Arc::new(FixedClock(fixed_timestamp())),
-            )),
+            task_repository.clone(),
             Arc::new(FakeVideoFileRepository::default()),
             Arc::new(ThumbnailFetcher::new(
                 video_repository,
                 Arc::new(FakeVideoDownloaderRepository::default()),
+                task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -1774,20 +2019,6 @@ mod tests {
         }
     }
 
-    /// One `fetch_thumbnail` call as `FakeVideoDownloaderRepository` records
-    /// it, for `my_video()` in `PL1`'s output directory.
-    fn thumbnail_call(
-        existing_folder: Option<&str>,
-    ) -> (String, String, String, PathBuf, Option<String>) {
-        (
-            "https://www.youtube.com/watch?v=vid1".to_string(),
-            "My Video".to_string(),
-            "vid1".to_string(),
-            PathBuf::from("/videos/my-playlist"),
-            existing_folder.map(str::to_string),
-        )
-    }
-
     /// The `(output_dir, entry)` pair the fake records for one delete call.
     fn deleted(entry: &str) -> (PathBuf, String) {
         (PathBuf::from("/videos/my-playlist"), entry.to_string())
@@ -1800,6 +2031,17 @@ mod tests {
                 playlist_id: "PL1".to_string(),
             },
             fixed_timestamp() + chrono::Duration::seconds(3600),
+        )
+    }
+
+    fn fetch_thumbnail_task(id: i64, video_id: &VideoRecordId) -> ScheduledTask {
+        pending_task(
+            id,
+            &Task::FetchThumbnail {
+                video_id: video_id.as_str().to_string(),
+                output_dir: "/videos/my-playlist".to_string(),
+            },
+            fixed_timestamp(),
         )
     }
 

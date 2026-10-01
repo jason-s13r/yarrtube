@@ -1,9 +1,12 @@
 use crate::domain::task::{DeadLetteredTask, ScheduledTask, Task, TaskStatus};
+use crate::infrastructure::shared::sqlite_connection::Database;
 use crate::infrastructure::shared::system_clock::Clock;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, params};
-use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Row, params};
+use std::sync::Arc;
 use tracing::info;
 
 pub trait TaskRepository: Send + Sync {
@@ -93,21 +96,17 @@ fn dedupe_predicate(task: &Task, payload: &str) -> &'static str {
 }
 
 pub struct SqliteTaskRepository {
-    conn: Arc<Mutex<Connection>>,
+    db: Database,
     clock: Arc<dyn Clock>,
 }
 
 impl SqliteTaskRepository {
-    pub fn new(conn: Arc<Mutex<Connection>>, clock: Arc<dyn Clock>) -> Self {
-        Self { conn, clock }
+    pub fn new(db: Database, clock: Arc<dyn Clock>) -> Self {
+        Self { db, clock }
     }
 
     fn list_where(&self, predicate: &str) -> anyhow::Result<Vec<ScheduledTask>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!("database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         let query = format!("SELECT {SELECT_COLUMNS} FROM tasks WHERE {predicate} ORDER BY id ASC");
         let mut stmt = conn
             .prepare(&query)
@@ -124,10 +123,7 @@ impl SqliteTaskRepository {
 
     #[cfg(test)]
     fn find(&self, id: i64) -> anyhow::Result<Option<ScheduledTask>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         conn.query_row(
             &format!("SELECT {SELECT_COLUMNS} FROM tasks WHERE id = ?1"),
             params![id],
@@ -140,10 +136,7 @@ impl SqliteTaskRepository {
     /// Every row in the dead-letter table, which `TaskRepository` cannot read.
     #[cfg(test)]
     pub fn list_dead_lettered(&self) -> anyhow::Result<Vec<DeadLetteredTask>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         let mut stmt = conn
             .prepare(
                 "SELECT original_task_id, task_type, payload, retries, last_error, created_at, failed_at
@@ -176,13 +169,7 @@ impl SqliteTaskRepository {
 
 impl TaskRepository for SqliteTaskRepository {
     fn schedule(&self, task: &Task, run_at: DateTime<Utc>) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| {
-                tracing::error!(task_type = task.task_type(), "database lock poisoned")
-            })
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         let payload = task.payload().to_string();
         let now = self.clock.now().to_rfc3339();
         let inserted = conn
@@ -216,11 +203,7 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     fn claim(&self, id: i64, now: DateTime<Utc>) -> anyhow::Result<Option<ScheduledTask>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(task_id = id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.query_row(
             &format!(
                 "UPDATE tasks SET status = 'running', updated_at = ?2 WHERE id = ?1 AND status = 'pending' RETURNING {SELECT_COLUMNS}"
@@ -234,11 +217,7 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     fn list_eligible(&self) -> anyhow::Result<Vec<ScheduledTask>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!("database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {SELECT_COLUMNS} FROM tasks WHERE status = 'pending' AND run_at <= ?1 ORDER BY run_at ASC, id ASC"
@@ -268,11 +247,7 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     fn update(&self, task: &ScheduledTask) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(task_id = task.id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.execute(
             "UPDATE tasks SET status = ?2, retries = ?3, run_at = ?4, updated_at = ?5, last_error = ?6 WHERE id = ?1",
             params![
@@ -290,11 +265,7 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     fn delete(&self, id: i64) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(task_id = id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])
             .inspect_err(|e| tracing::error!(task_id = id, error = %e, "failed to delete task"))
             .context("failed to delete task")?;
@@ -302,13 +273,7 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     fn dead_letter(&self, task: &DeadLetteredTask) -> anyhow::Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| {
-                tracing::error!(task_id = task.original_task_id, "database lock poisoned")
-            })
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let mut conn = self.db.write()?;
         let tx = conn
             .transaction()
             .inspect_err(|e| {
@@ -374,7 +339,7 @@ mod tests {
     fn repo_with_clock(now: DateTime<Utc>) -> SqliteTaskRepository {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::infrastructure::shared::sqlite_migrations::apply(&mut conn).unwrap();
-        SqliteTaskRepository::new(Arc::new(Mutex::new(conn)), Arc::new(FixedClock(now)))
+        SqliteTaskRepository::new(Database::single(conn), Arc::new(FixedClock(now)))
     }
 
     fn repo() -> SqliteTaskRepository {
@@ -503,7 +468,7 @@ mod tests {
     fn it_should_create_a_queryable_empty_dead_letter_table() {
         let repo = repo();
 
-        let conn = repo.conn.lock().unwrap();
+        let conn = repo.db.read().unwrap();
         let mut stmt = conn.prepare("SELECT * FROM tasks_dead_letter").unwrap();
         let rows = stmt.query_map([], |_| Ok(())).unwrap();
 
@@ -535,7 +500,7 @@ mod tests {
         assert!(repo.list_eligible().unwrap().is_empty());
         assert!(repo.find(id).unwrap().is_none());
 
-        let conn = repo.conn.lock().unwrap();
+        let conn = repo.db.read().unwrap();
         let (original_task_id, task_type, payload, retries, last_error): (
             i64,
             String,
@@ -629,7 +594,7 @@ mod tests {
         }
 
         assert!(repo.find(id).unwrap().is_none());
-        let conn = repo.conn.lock().unwrap();
+        let conn = repo.db.read().unwrap();
         let (original_task_id, retries): (i64, i64) = conn
             .query_row(
                 "SELECT original_task_id, retries FROM tasks_dead_letter",

@@ -84,14 +84,13 @@ mod tests {
     use crate::infrastructure::shared::system_clock::FixedClock;
     use chrono::{DateTime, Utc};
     use rusqlite::Connection;
-    use std::sync::Mutex;
 
     #[test]
     fn it_should_schedule_file_deletion_if_downloaded() {
         let db = TestDatabase::new();
-        let channel_repository = Arc::new(SqliteChannelRepository::new(db.connection()));
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.shared_connection(),
+            db.database(),
             Arc::new(FixedClock(fixed_timestamp())),
         ));
         channel_repository.insert(&channel("@somechannel")).unwrap();
@@ -124,9 +123,9 @@ mod tests {
     #[test]
     fn it_should_skip_if_not_downloaded() {
         let db = TestDatabase::new();
-        let channel_repository = Arc::new(SqliteChannelRepository::new(db.connection()));
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.shared_connection(),
+            db.database(),
             Arc::new(FixedClock(fixed_timestamp())),
         ));
         channel_repository.insert(&channel("@somechannel")).unwrap();
@@ -159,9 +158,9 @@ mod tests {
     #[test]
     fn it_should_skip_if_channel_is_gone() {
         let db = TestDatabase::new();
-        let channel_repository = Arc::new(SqliteChannelRepository::new(db.connection()));
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
         let task_repository = Arc::new(SqliteTaskRepository::new(
-            db.shared_connection(),
+            db.database(),
             Arc::new(FixedClock(fixed_timestamp())),
         ));
         let subscriber = DeleteVideoFileOnVideoRemovedFromChannel::new(
@@ -187,7 +186,7 @@ mod tests {
         DeleteVideoFileOnVideoRemovedFromChannel::new(
             Arc::new(SqliteChannelRepository::new(unused_connection())),
             Arc::new(SqliteTaskRepository::new(
-                Arc::new(Mutex::new(unused_connection())),
+                unused_connection(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
@@ -195,8 +194,10 @@ mod tests {
         )
     }
 
-    fn unused_connection() -> Connection {
-        Connection::open_in_memory().unwrap()
+    fn unused_connection() -> crate::infrastructure::shared::sqlite_connection::Database {
+        crate::infrastructure::shared::sqlite_connection::Database::single(
+            Connection::open_in_memory().unwrap(),
+        )
     }
 
     fn channel(channel_handle: &str) -> Channel {

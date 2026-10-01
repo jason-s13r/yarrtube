@@ -1,10 +1,12 @@
 use crate::domain::channel::{Channel, ChannelHandle, VideoLimit};
 use crate::domain::playlist::PlaylistPath;
 use crate::domain::shared::Quality;
+use crate::infrastructure::shared::sqlite_connection::Database;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
-use std::sync::Mutex;
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, params};
 
 pub trait ChannelRepository: Send + Sync {
     fn find(&self, id: &ChannelHandle) -> anyhow::Result<Option<Channel>>;
@@ -14,24 +16,18 @@ pub trait ChannelRepository: Send + Sync {
 }
 
 pub struct SqliteChannelRepository {
-    conn: Mutex<Connection>,
+    db: Database,
 }
 
 impl SqliteChannelRepository {
-    pub fn new(conn: Connection) -> Self {
-        Self {
-            conn: Mutex::new(conn),
-        }
+    pub fn new(db: Database) -> Self {
+        Self { db }
     }
 }
 
 impl ChannelRepository for SqliteChannelRepository {
     fn find(&self, id: &ChannelHandle) -> anyhow::Result<Option<Channel>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(channel_id = %id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         conn.query_row(
             "SELECT id, name, youtube_channel_id, quality, video_limit, path, avatar_filename, created_at FROM channels WHERE id = ?1",
             params![id.as_str()],
@@ -69,11 +65,7 @@ impl ChannelRepository for SqliteChannelRepository {
     }
 
     fn insert(&self, channel: &Channel) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(channel_id = %channel.id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.execute(
             "INSERT INTO channels (id, name, youtube_channel_id, quality, video_limit, path, avatar_filename, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -93,11 +85,7 @@ impl ChannelRepository for SqliteChannelRepository {
     }
 
     fn delete(&self, id: &ChannelHandle) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(channel_id = %id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.execute("DELETE FROM channels WHERE id = ?1", params![id.as_str()])
             .inspect_err(
                 |e| tracing::error!(channel_id = %id, error = %e, "failed to delete channel"),
@@ -107,11 +95,7 @@ impl ChannelRepository for SqliteChannelRepository {
     }
 
     fn list(&self) -> anyhow::Result<Vec<Channel>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!("database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, youtube_channel_id, quality, video_limit, path, avatar_filename, created_at FROM channels ORDER BY name COLLATE NOCASE, rowid",
@@ -201,7 +185,7 @@ mod tests {
     fn repo() -> SqliteChannelRepository {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::infrastructure::shared::sqlite_migrations::apply(&mut conn).unwrap();
-        SqliteChannelRepository::new(conn)
+        SqliteChannelRepository::new(Database::single(conn))
     }
 
     fn channel(id: &str, name: &str) -> Channel {

@@ -1,10 +1,12 @@
 use crate::domain::playlist::PlaylistId;
 use crate::domain::playlist_video::PlaylistVideo;
 use crate::domain::video::{VideoId, VideoRecordId};
+use crate::infrastructure::shared::sqlite_connection::Database;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
-use std::sync::Mutex;
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, params};
 
 pub trait PlaylistVideoRepository: Send + Sync {
     /// Insert-or-replace keyed by `(playlist_id, video_id)`.
@@ -25,26 +27,18 @@ pub trait PlaylistVideoRepository: Send + Sync {
 }
 
 pub struct SqlitePlaylistVideoRepository {
-    conn: Mutex<Connection>,
+    db: Database,
 }
 
 impl SqlitePlaylistVideoRepository {
-    pub fn new(conn: Connection) -> Self {
-        Self {
-            conn: Mutex::new(conn),
-        }
+    pub fn new(db: Database) -> Self {
+        Self { db }
     }
 }
 
 impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
     fn save(&self, playlist_video: &PlaylistVideo) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| {
-                tracing::error!(playlist_id = %playlist_video.playlist_id, "database lock poisoned")
-            })
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.execute(
             "INSERT INTO playlist_videos (playlist_id, video_id, position, created_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -70,11 +64,7 @@ impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
         playlist_id: &PlaylistId,
         youtube_video_id: &VideoId,
     ) -> anyhow::Result<Option<PlaylistVideo>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(playlist_id = %playlist_id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         conn.query_row(
             "SELECT pv.id, pv.playlist_id, pv.video_id, pv.position, pv.created_at
              FROM playlist_videos pv
@@ -93,11 +83,7 @@ impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
     }
 
     fn find_by_video(&self, video_id: &VideoRecordId) -> anyhow::Result<Option<PlaylistVideo>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(video_id = %video_id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         conn.query_row(
             "SELECT id, playlist_id, video_id, position, created_at
              FROM playlist_videos WHERE video_id = ?1",
@@ -114,11 +100,7 @@ impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
     }
 
     fn list_for_playlist(&self, playlist_id: &PlaylistId) -> anyhow::Result<Vec<PlaylistVideo>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(playlist_id = %playlist_id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, playlist_id, video_id, position, created_at
@@ -146,11 +128,7 @@ impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
     }
 
     fn delete(&self, playlist_id: &PlaylistId, youtube_video_id: &VideoId) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(playlist_id = %playlist_id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.execute(
             "DELETE FROM playlist_videos
              WHERE playlist_id = ?1 AND video_id IN (
@@ -166,11 +144,7 @@ impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
     }
 
     fn delete_all_for_playlist(&self, playlist_id: &PlaylistId) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(playlist_id = %playlist_id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.execute(
             "DELETE FROM playlist_videos WHERE playlist_id = ?1",
             params![playlist_id.as_str()],
@@ -216,7 +190,7 @@ mod tests {
     fn repo() -> SqlitePlaylistVideoRepository {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::infrastructure::shared::sqlite_migrations::apply(&mut conn).unwrap();
-        SqlitePlaylistVideoRepository::new(conn)
+        SqlitePlaylistVideoRepository::new(Database::single(conn))
     }
 
     fn playlist_id() -> PlaylistId {
@@ -229,7 +203,7 @@ mod tests {
     fn seed_video(repo: &SqlitePlaylistVideoRepository, youtube_id: &str, title: &str) -> Video {
         let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
         let video = Video::create(VideoId::new(youtube_id).unwrap(), title, now);
-        let conn = repo.conn.lock().unwrap();
+        let conn = repo.db.write().unwrap();
         conn.execute(
             "INSERT INTO videos (id, youtube_id, title, status, quality, filename, created_at, updated_at)
              VALUES (?1, ?2, ?3, 'PENDING', NULL, NULL, ?4, ?4)",

@@ -56,8 +56,8 @@ use crate::infrastructure::shared::domain_events::event_repository::{
 use crate::infrastructure::shared::sqlite_connection;
 use crate::infrastructure::shared::system_clock::{Clock, SystemClock};
 use anyhow::Result;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Where the adapters that touch the outside world point at.
 pub struct InfrastructureSettings {
@@ -69,8 +69,9 @@ pub struct InfrastructureSettings {
 }
 
 /// One production instance of every port implementation, shared by every
-/// domain service built from it. Each SQLite-backed repository opens its own
-/// connection, so the schema must already be migrated.
+/// domain service built from it. Every SQLite-backed repository shares one
+/// `Database` (a single write connection plus a read connection), so the
+/// schema must already be migrated.
 pub struct InfrastructureContainer {
     pub clock: Arc<dyn Clock>,
     pub playlist_repository: Arc<dyn PlaylistRepository>,
@@ -99,34 +100,23 @@ impl InfrastructureContainer {
         let db_path = settings.db_path.as_path();
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
 
+        // One shared Database for the whole process: a single write connection
+        // (all writes serialize through its mutex, so SQLite never sees two
+        // concurrent writers and can never return "database is locked" against
+        // itself) plus a read connection that, being distinct, reads
+        // concurrently with an in-progress write under WAL.
+        let db = sqlite_connection::Database::open(db_path)?;
+
         Ok(Self {
-            playlist_repository: Arc::new(SqlitePlaylistRepository::new(sqlite_connection::open(
-                db_path,
-            )?)),
-            channel_repository: Arc::new(SqliteChannelRepository::new(sqlite_connection::open(
-                db_path,
-            )?)),
-            video_repository: Arc::new(SqliteVideoRepository::new(sqlite_connection::open(
-                db_path,
-            )?)),
-            playlist_video_repository: Arc::new(SqlitePlaylistVideoRepository::new(
-                sqlite_connection::open(db_path)?,
-            )),
-            channel_video_repository: Arc::new(SqliteChannelVideoRepository::new(
-                sqlite_connection::open(db_path)?,
-            )),
-            video_metadata_repository: Arc::new(SqliteVideoMetadataRepository::new(
-                sqlite_connection::open(db_path)?,
-            )),
-            task_repository: Arc::new(SqliteTaskRepository::new(
-                open_shared(db_path)?,
-                clock.clone(),
-            )),
-            event_publisher: Arc::new(SqliteEventPublisher::new(
-                open_shared(db_path)?,
-                clock.clone(),
-            )),
-            event_repository: Arc::new(SqliteEventRepository::new(open_shared(db_path)?)),
+            playlist_repository: Arc::new(SqlitePlaylistRepository::new(db.clone())),
+            channel_repository: Arc::new(SqliteChannelRepository::new(db.clone())),
+            video_repository: Arc::new(SqliteVideoRepository::new(db.clone())),
+            playlist_video_repository: Arc::new(SqlitePlaylistVideoRepository::new(db.clone())),
+            channel_video_repository: Arc::new(SqliteChannelVideoRepository::new(db.clone())),
+            video_metadata_repository: Arc::new(SqliteVideoMetadataRepository::new(db.clone())),
+            task_repository: Arc::new(SqliteTaskRepository::new(db.clone(), clock.clone())),
+            event_publisher: Arc::new(SqliteEventPublisher::new(db.clone(), clock.clone())),
+            event_repository: Arc::new(SqliteEventRepository::new(db.clone())),
             youtube_playlist_repository: Arc::new(YoutubeApiPlaylistRepository::new(
                 settings.youtube_api_key.clone(),
             )),
@@ -156,8 +146,4 @@ impl InfrastructureContainer {
             clock,
         })
     }
-}
-
-fn open_shared(db_path: &Path) -> Result<Arc<Mutex<rusqlite::Connection>>> {
-    Ok(Arc::new(Mutex::new(sqlite_connection::open(db_path)?)))
 }

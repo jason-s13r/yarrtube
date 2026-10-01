@@ -1,10 +1,12 @@
 use crate::domain::video::VideoRecordId;
 use crate::domain::video_metadata::{VideoMetadata, render_movie_nfo};
+use crate::infrastructure::shared::sqlite_connection::Database;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Row, params};
 use std::path::Path;
-use std::sync::Mutex;
 
 pub const MOVIE_NFO_FILENAME: &str = "movie.nfo";
 
@@ -44,14 +46,12 @@ struct VideoMetadataRow {
 }
 
 pub struct SqliteVideoMetadataRepository {
-    conn: Mutex<Connection>,
+    db: Database,
 }
 
 impl SqliteVideoMetadataRepository {
-    pub fn new(conn: Connection) -> Self {
-        Self {
-            conn: Mutex::new(conn),
-        }
+    pub fn new(db: Database) -> Self {
+        Self { db }
     }
 
     fn write_movie_nfo(metadata: &VideoMetadata, video_dir: &Path) -> anyhow::Result<()> {
@@ -71,11 +71,7 @@ impl VideoMetadataRepository for SqliteVideoMetadataRepository {
     ) -> anyhow::Result<()> {
         Self::write_movie_nfo(metadata, video_dir)?;
 
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(video_id = %video_id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         let tags = serde_json::to_string(&metadata.tags)
             .context("failed to serialize video metadata tags")?;
         conn.execute(
@@ -117,11 +113,7 @@ impl VideoMetadataRepository for SqliteVideoMetadataRepository {
     }
 
     fn find(&self, video_id: &VideoRecordId) -> anyhow::Result<Option<VideoMetadata>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(video_id = %video_id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         conn.query_row(
             "SELECT title, plot, studio, director, published_at, genre, tags, uniqueid, thumb, sorttitle, created_at, updated_at
              FROM video_metadata WHERE video_id = ?1",
@@ -205,7 +197,7 @@ mod tests {
     fn repo() -> SqliteVideoMetadataRepository {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::infrastructure::shared::sqlite_migrations::apply(&mut conn).unwrap();
-        SqliteVideoMetadataRepository::new(conn)
+        SqliteVideoMetadataRepository::new(Database::single(conn))
     }
 
     fn unique_temp_dir(name: &str) -> std::path::PathBuf {

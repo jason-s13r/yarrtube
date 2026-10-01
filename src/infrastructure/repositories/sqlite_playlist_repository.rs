@@ -1,10 +1,12 @@
 use crate::domain::playlist::PlaylistId;
 use crate::domain::playlist::{Playlist, PlaylistKind, PlaylistName, PlaylistPath};
 use crate::domain::shared::Quality;
+use crate::infrastructure::shared::sqlite_connection::Database;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
-use std::sync::Mutex;
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, params};
 
 pub trait PlaylistRepository: Send + Sync {
     fn find(&self, id: &PlaylistId) -> anyhow::Result<Option<Playlist>>;
@@ -14,24 +16,18 @@ pub trait PlaylistRepository: Send + Sync {
 }
 
 pub struct SqlitePlaylistRepository {
-    conn: Mutex<Connection>,
+    db: Database,
 }
 
 impl SqlitePlaylistRepository {
-    pub fn new(conn: Connection) -> Self {
-        Self {
-            conn: Mutex::new(conn),
-        }
+    pub fn new(db: Database) -> Self {
+        Self { db }
     }
 }
 
 impl PlaylistRepository for SqlitePlaylistRepository {
     fn find(&self, id: &PlaylistId) -> anyhow::Result<Option<Playlist>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(playlist_id = %id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         conn.query_row(
             "SELECT id, name, path, quality, kind, created_at FROM playlists WHERE id = ?1",
             params![id.as_str()],
@@ -56,11 +52,7 @@ impl PlaylistRepository for SqlitePlaylistRepository {
     }
 
     fn insert(&self, playlist: &Playlist) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(playlist_id = %playlist.id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.execute(
             "INSERT INTO playlists (id, name, path, quality, kind, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -78,11 +70,7 @@ impl PlaylistRepository for SqlitePlaylistRepository {
     }
 
     fn delete(&self, id: &PlaylistId) -> anyhow::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!(playlist_id = %id, "database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.write()?;
         conn.execute("DELETE FROM playlists WHERE id = ?1", params![id.as_str()])
             .inspect_err(
                 |e| tracing::error!(playlist_id = %id, error = %e, "failed to delete playlist"),
@@ -92,11 +80,7 @@ impl PlaylistRepository for SqlitePlaylistRepository {
     }
 
     fn list(&self) -> anyhow::Result<Vec<Playlist>> {
-        let conn = self
-            .conn
-            .lock()
-            .inspect_err(|_| tracing::error!("database lock poisoned"))
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+        let conn = self.db.read()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, path, quality, kind, created_at FROM playlists ORDER BY name COLLATE NOCASE, rowid",
@@ -156,7 +140,7 @@ mod tests {
     fn repo() -> SqlitePlaylistRepository {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::infrastructure::shared::sqlite_migrations::apply(&mut conn).unwrap();
-        SqlitePlaylistRepository::new(conn)
+        SqlitePlaylistRepository::new(Database::single(conn))
     }
 
     fn playlist(id: &str, name: &str) -> Playlist {

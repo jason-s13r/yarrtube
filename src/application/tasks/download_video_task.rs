@@ -216,6 +216,164 @@ mod tests {
     }
 
     #[test]
+    fn it_should_exclude_a_permanently_unavailable_video_without_dead_lettering_on_the_last_attempt()
+     {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let task = DownloadVideoTask::new(video_downloader(
+            &db,
+            video_repository.clone(),
+            Arc::new(
+                FakeVideoDownloaderRepository::with_failed_stderr("Video unavailable")
+                    .with_diagnosed_reason(
+                        "It was blocked due to the claimed content by Mediatoon.",
+                    ),
+            ),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository::default()),
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
+        ));
+
+        let result = run(&task, &payload_for(video.id.as_str()), true);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![
+                video
+                    .start_download(fixed_timestamp())
+                    .mark_excluded(fixed_timestamp())
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_exclude_a_video_blocked_by_claimed_content() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let task = DownloadVideoTask::new(video_downloader(
+            &db,
+            video_repository.clone(),
+            Arc::new(
+                FakeVideoDownloaderRepository::with_failed_stderr("Video unavailable")
+                    .with_diagnosed_reason(
+                        "It was blocked due to the claimed content by Mediatoon.",
+                    ),
+            ),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository::default()),
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
+        ));
+
+        let result = run(&task, &payload_for(video.id.as_str()), false);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![
+                video
+                    .start_download(fixed_timestamp())
+                    .mark_excluded(fixed_timestamp())
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_exclude_a_members_only_video() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let task = DownloadVideoTask::new(video_downloader(
+            &db,
+            video_repository.clone(),
+            Arc::new(FakeVideoDownloaderRepository::new(false).with_diagnosed_reason(
+                "Join this channel to get access to members-only content like this video, and other exclusive perks.",
+            )),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository::default()),
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
+        ));
+
+        let result = run(&task, &payload_for(video.id.as_str()), false);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![
+                video
+                    .start_download(fixed_timestamp())
+                    .mark_excluded(fixed_timestamp())
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_not_exclude_a_bare_video_unavailable() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let task = DownloadVideoTask::new(video_downloader(
+            &db,
+            video_repository.clone(),
+            Arc::new(FakeVideoDownloaderRepository::with_failed_stderr(
+                "Video unavailable",
+            )),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository::default()),
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
+        ));
+
+        let result = run(&task, &payload_for(video.id.as_str()), false);
+
+        assert_eq!(result, Err("Video unavailable".to_string()));
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![
+                video
+                    .start_download(fixed_timestamp())
+                    .mark_errored_retrying(fixed_timestamp())
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_treat_a_failed_diagnostic_probe_as_undetermined() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let task = DownloadVideoTask::new(video_downloader(
+            &db,
+            video_repository.clone(),
+            Arc::new(FakeVideoDownloaderRepository::new(false).with_diagnose_error()),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository::default()),
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
+        ));
+
+        let result = run(&task, &payload_for(video.id.as_str()), false);
+
+        assert_eq!(
+            result,
+            Err(format!("yt-dlp failed to download video {}", video.id))
+        );
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![
+                video
+                    .start_download(fixed_timestamp())
+                    .mark_errored_retrying(fixed_timestamp())
+            ]
+        );
+    }
+
+    #[test]
     fn it_should_skip_if_video_is_gone() {
         let db = TestDatabase::new();
         let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));

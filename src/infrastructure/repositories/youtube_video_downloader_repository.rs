@@ -43,6 +43,15 @@ pub trait VideoDownloaderRepository: Send + Sync {
         output_dir: &Path,
         existing_folder: Option<&str>,
     ) -> anyhow::Result<Option<FetchedThumbnail>>;
+
+    /// Runs a simulate-only probe (forcing the alternate player clients) to
+    /// reveal the *precise* reason a download failed, since `yt-dlp`'s default
+    /// clients collapse many permanent blocks into a bare "Video unavailable".
+    /// Returns `Ok(Some(reason))` with the reason `yt-dlp` printed,
+    /// `Ok(None)` when none can be determined (clean exit, or only a bare
+    /// "Video unavailable"), and `Err` only for a systemic problem. The probe
+    /// never downloads — it only diagnoses.
+    fn diagnose(&self, video_url: &str) -> anyhow::Result<Option<String>>;
 }
 
 /// Invokes `yt-dlp` at `ytdlp_path`, the same configured path `update-ytdlp`
@@ -97,11 +106,26 @@ impl VideoDownloaderRepository for YtDlpVideoDownloaderRepository {
             existing_folder,
         )
     }
+
+    fn diagnose(&self, video_url: &str) -> anyhow::Result<Option<String>> {
+        ytdlp::diagnose(&self.ytdlp_path, video_url)
+    }
+}
+
+/// What a `FakeVideoDownloaderRepository`'s `diagnose` yields: a determined
+/// reason (`Some`), nothing determinable (`None`), or a systemic probe error
+/// the downloader must swallow.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) enum DiagnoseOutcome {
+    Reason(Option<String>),
+    Error,
 }
 
 #[cfg(test)]
 pub struct FakeVideoDownloaderRepository {
     pub(crate) result: std::sync::Mutex<DownloadAttempt>,
+    pub(crate) diagnose_result: std::sync::Mutex<DiagnoseOutcome>,
     #[allow(clippy::type_complexity)]
     pub(crate) calls: std::sync::Mutex<
         Vec<(
@@ -189,9 +213,30 @@ impl FakeVideoDownloaderRepository {
         }
     }
 
+    /// Makes the diagnostic probe report `reason` as the precise failure
+    /// reason.
+    pub fn with_diagnosed_reason(self, reason: &str) -> Self {
+        Self {
+            diagnose_result: std::sync::Mutex::new(DiagnoseOutcome::Reason(Some(
+                reason.to_string(),
+            ))),
+            ..self
+        }
+    }
+
+    /// Makes the diagnostic probe itself fail, so tests can prove the
+    /// downloader swallows it and treats the reason as undetermined.
+    pub fn with_diagnose_error(self) -> Self {
+        Self {
+            diagnose_result: std::sync::Mutex::new(DiagnoseOutcome::Error),
+            ..self
+        }
+    }
+
     fn with_result(result: DownloadAttempt) -> Self {
         Self {
             result: std::sync::Mutex::new(result),
+            diagnose_result: std::sync::Mutex::new(DiagnoseOutcome::Reason(None)),
             calls: Default::default(),
             thumbnail_result: Default::default(),
             thumbnail_calls: Default::default(),
@@ -243,6 +288,13 @@ impl VideoDownloaderRepository for FakeVideoDownloaderRepository {
         match self.thumbnail_result.lock().unwrap().take() {
             Some(result) => result,
             None => Ok(None),
+        }
+    }
+
+    fn diagnose(&self, _video_url: &str) -> anyhow::Result<Option<String>> {
+        match self.diagnose_result.lock().unwrap().clone() {
+            DiagnoseOutcome::Reason(reason) => Ok(reason),
+            DiagnoseOutcome::Error => Err(anyhow::anyhow!("fake diagnose error")),
         }
     }
 }

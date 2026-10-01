@@ -9,6 +9,7 @@ pub enum VideoStatus {
     Downloaded,
     ErroredRetrying,
     Errored,
+    Excluded,
 }
 
 impl VideoStatus {
@@ -19,6 +20,7 @@ impl VideoStatus {
             Self::Downloaded => "DOWNLOADED",
             Self::ErroredRetrying => "ERRORED_RETRYING",
             Self::Errored => "ERRORED",
+            Self::Excluded => "EXCLUDED",
         }
     }
 
@@ -29,6 +31,7 @@ impl VideoStatus {
             "DOWNLOADED" => Ok(Self::Downloaded),
             "ERRORED_RETRYING" => Ok(Self::ErroredRetrying),
             "ERRORED" => Ok(Self::Errored),
+            "EXCLUDED" => Ok(Self::Excluded),
             other => Err(VideoError(format!("unknown video status '{other}'"))),
         }
     }
@@ -75,6 +78,14 @@ mod tests {
         assert_eq!(
             VideoStatus::parse(VideoStatus::Errored.as_str()).unwrap(),
             VideoStatus::Errored
+        );
+    }
+
+    #[test]
+    fn it_should_round_trip_excluded_through_its_string_representation() {
+        assert_eq!(
+            VideoStatus::parse(VideoStatus::Excluded.as_str()).unwrap(),
+            VideoStatus::Excluded
         );
     }
 

@@ -477,6 +477,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_omit_excluded_videos_from_a_playlist() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let kept = Video::create(VideoId::new("vid_kept").unwrap(), "Kept", fixed_timestamp());
+        let excluded = Video::create(
+            VideoId::new("vid_excluded").unwrap(),
+            "Excluded",
+            fixed_timestamp(),
+        )
+        .start_download(fixed_timestamp())
+        .mark_excluded(fixed_timestamp());
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            "PL1",
+            &kept,
+        );
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            "PL1",
+            &excluded,
+        );
+        let video_searcher = VideoSearcher::new(
+            playlist_repository,
+            playlist_video_repository,
+            Arc::new(SqliteChannelRepository::new(db.connection())),
+            Arc::new(SqliteChannelVideoRepository::new(db.connection())),
+            video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let response = list_for_playlist(video_searcher, "PL1").await;
+
+        assert_eq!(
+            response,
+            Ok(vec![pending_video_response("vid_kept", "Kept")])
+        );
+    }
+
+    #[tokio::test]
     async fn it_should_fail_if_playlist_not_found() {
         let db = TestDatabase::new();
         let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
@@ -688,6 +734,55 @@ mod tests {
         let response = list_for_channel(video_searcher, "@somechannel").await;
 
         assert_eq!(response, Ok(vec![]));
+    }
+
+    #[tokio::test]
+    async fn it_should_omit_excluded_videos_from_a_channel() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let channel_video_repository = Arc::new(SqliteChannelVideoRepository::new(db.connection()));
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.connection()));
+        channel_repository
+            .insert(&channel("@somechannel", None))
+            .unwrap();
+        let kept = Video::create(VideoId::new("vid_kept").unwrap(), "Kept", fixed_timestamp());
+        let excluded = Video::create(
+            VideoId::new("vid_excluded").unwrap(),
+            "Excluded",
+            fixed_timestamp(),
+        )
+        .start_download(fixed_timestamp())
+        .mark_excluded(fixed_timestamp());
+        save_channel_video(
+            video_repository.as_ref(),
+            channel_video_repository.as_ref(),
+            "@somechannel",
+            &kept,
+            0,
+        );
+        save_channel_video(
+            video_repository.as_ref(),
+            channel_video_repository.as_ref(),
+            "@somechannel",
+            &excluded,
+            1,
+        );
+        let video_searcher = VideoSearcher::new(
+            Arc::new(SqlitePlaylistRepository::new(db.connection())),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection())),
+            channel_repository,
+            channel_video_repository,
+            video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+
+        let response = list_for_channel(video_searcher, "@somechannel").await;
+
+        assert_eq!(
+            response,
+            Ok(vec![pending_video_response("vid_kept", "Kept")])
+        );
     }
 
     #[tokio::test]
@@ -1266,6 +1361,41 @@ mod tests {
                     fixed_timestamp(),
                 )
             },
+        );
+        let video_searcher = VideoSearcher::new(
+            playlist_repository,
+            playlist_video_repository,
+            Arc::new(SqliteChannelRepository::new(db.connection())),
+            Arc::new(SqliteChannelVideoRepository::new(db.connection())),
+            video_repository,
+            Arc::new(SqliteVideoMetadataRepository::new(db.connection())),
+            Arc::new(FixedClock(watched_timestamp())),
+        );
+
+        let response = home(video_searcher).await;
+
+        assert_eq!(response, Ok(empty_home()));
+    }
+
+    #[tokio::test]
+    async fn it_should_exclude_excluded_videos_from_home() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.connection()));
+        let playlist_video_repository =
+            Arc::new(SqlitePlaylistVideoRepository::new(db.connection()));
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.connection()));
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            "PL1",
+            &Video::create(
+                VideoId::new("vid_excluded").unwrap(),
+                "Excluded",
+                fixed_timestamp(),
+            )
+            .start_download(fixed_timestamp())
+            .mark_excluded(fixed_timestamp()),
         );
         let video_searcher = VideoSearcher::new(
             playlist_repository,

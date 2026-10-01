@@ -1,5 +1,11 @@
 import { test, expect } from '@playwright/test'
-import { openAddPlaylistDialog, destinationNotice, slugOf } from '../helpers/addDialog.js'
+import {
+  openAddPlaylistDialog,
+  openAdvancedOptions,
+  destinationNotice,
+  fillPlaylist,
+  slugOf,
+} from '../helpers/addDialog.js'
 
 const PLAYLIST_ID = process.env.SMOKE_PLAYLIST_ID
 const PLAYLIST_TITLE = process.env.SMOKE_PLAYLIST_NAME ?? 'test'
@@ -52,20 +58,15 @@ test('it should state the title, count and destination', async ({ page }) => {
   )
 })
 
-test('it should expand advanced options from the change action', async ({ page }) => {
+test('it should auto-fill the folder name under advanced options', async ({ page }) => {
   test.skip(!PLAYLIST_ID, 'SMOKE_PLAYLIST_ID is not set')
 
   await page.goto('/')
   await openAddPlaylistDialog(page)
-  const dialog = page.getByRole('dialog')
-  await dialog.getByLabel('Playlist ID or URL').fill(PLAYLIST_ID)
+  const dialog = await fillPlaylist(page, { url: PLAYLIST_ID })
 
-  await destinationNotice(dialog).getByRole('button', { name: 'change' }).click()
+  await openAdvancedOptions(dialog)
 
-  await expect(dialog.getByRole('button', { name: /Advanced options/ })).toHaveAttribute(
-    'aria-expanded',
-    'true',
-  )
   await expect(dialog.getByLabel('Folder name')).toBeVisible()
   await expect(dialog.getByLabel('Folder name')).toHaveValue(slugOf(PLAYLIST_TITLE))
 })

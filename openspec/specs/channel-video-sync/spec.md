@@ -182,6 +182,8 @@ PENDING and trigger a fresh download of it. A video that became
 permanently errored less than 24 hours before the pass SHALL be left
 permanently errored and SHALL NOT have a download triggered by that pass.
 There is no limit on how many times a given video may be recovered this way.
+An excluded video SHALL NOT be recovered by this pass regardless of how long
+ago it was excluded.
 
 #### Scenario: Permanently errored video found during reconcile
 - **WHEN** a reconcile pass finds a video that has been permanently errored for 24 hours or more
@@ -190,6 +192,10 @@ There is no limit on how many times a given video may be recovered this way.
 #### Scenario: Video permanently errored less than 24 hours ago
 - **WHEN** a reconcile pass finds a video that became permanently errored less than 24 hours earlier
 - **THEN** the system leaves the video permanently errored and does not trigger a download for it
+
+#### Scenario: Excluded video is never recovered
+- **WHEN** a reconcile pass finds an excluded video, however long ago it was excluded
+- **THEN** the system leaves the video excluded and does not trigger a download for it
 
 ### Requirement: Missing Metadata Recovery (Channels)
 The system SHALL, for every channel, regenerate a downloaded video's

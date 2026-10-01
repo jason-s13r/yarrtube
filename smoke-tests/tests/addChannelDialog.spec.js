@@ -1,5 +1,10 @@
 import { test, expect } from '@playwright/test'
-import { openAddChannelDialog, destinationNotice, slugOf } from '../helpers/addDialog.js'
+import {
+  openAddChannelDialog,
+  openAdvancedOptions,
+  destinationNotice,
+  slugOf,
+} from '../helpers/addDialog.js'
 
 const CHANNEL_HANDLE = process.env.SMOKE_CHANNEL_HANDLE ?? '@BlenderOfficial'
 
@@ -86,18 +91,14 @@ test('it should update the notice from the advanced options', async ({ page }) =
   await expect(notice).toContainText(`Videos from “${title}” will be downloaded to`)
 })
 
-test('it should expand advanced options from the change action', async ({ page }) => {
+test('it should auto-fill the folder name under advanced options', async ({ page }) => {
   await page.goto('/')
   await openAddChannelDialog(page)
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('Channel Handle or URL').fill(CHANNEL_HANDLE)
 
-  await destinationNotice(dialog).getByRole('button', { name: 'change' }).click()
+  await openAdvancedOptions(dialog)
 
-  await expect(dialog.getByRole('button', { name: /Advanced options/ })).toHaveAttribute(
-    'aria-expanded',
-    'true',
-  )
   await expect(dialog.getByLabel('Folder name')).toBeVisible()
   await expect(dialog.getByLabel('Folder name')).toHaveValue(slugOf(CHANNEL_HANDLE))
 })

@@ -21,10 +21,16 @@ export async function openAdvancedOptions(dialog) {
 }
 
 export async function openFolderBrowser(dialog) {
-  const toggle = dialog.getByRole('button', { name: 'Parent folder' })
-  if ((await toggle.getAttribute('aria-expanded')) !== 'true') {
-    await toggle.click()
+  // The browser lives inline in the always-visible "Save to" field, revealed
+  // by "Choose another folder…"; once open, the list (and that button) is
+  // replaced by the breadcrumb browser, so opening is a no-op when it already
+  // shows.
+  const browser = dialog.getByRole('navigation', { name: 'Folder path' })
+  if (await browser.isVisible()) {
+    return
   }
+  await dialog.getByRole('button', { name: 'Choose another folder…' }).click()
+  await browser.waitFor({ state: 'visible' })
 }
 
 function escapeForRegExp(value) {

@@ -138,6 +138,8 @@ pub fn download_video(
     let output_template = format!("{folder}.%(ext)s");
     let mut args = args_for_quality(quality);
     args.extend([
+        "--concurrent-fragments".to_string(),
+        "4".to_string(),
         "--embed-thumbnail".to_string(),
         "--write-thumbnail".to_string(),
         "--convert-thumbnails".to_string(),
@@ -307,6 +309,86 @@ pub fn fetch_thumbnail(
             Ok(None)
         }
     }
+}
+
+/// Runs a simulate-only `yt-dlp` probe for `video_url`, forcing the
+/// alternate player clients, to reveal the *precise* reason a download
+/// failed — `yt-dlp`'s default clients collapse many distinct permanent
+/// blocks into a bare "Video unavailable". The probe never downloads (it only
+/// reveals the reason; a blocked video stays blocked), so it is safe and
+/// cheap.
+///
+/// Returns `Ok(Some(reason))` with the reason `yt-dlp` printed to stderr
+/// (its `ERROR: [<extractor>] <id>:` prefix stripped), `Ok(None)` when no
+/// precise reason can be determined (the probe exited cleanly with no error,
+/// or printed only a bare "Video unavailable" with no further detail).
+/// Returns `Err` only for a systemic problem: no binary at `ytdlp_path`, or a
+/// spawn failure — the caller swallows that and treats the reason as
+/// undetermined.
+pub fn diagnose(ytdlp_path: &Path, video_url: &str) -> Result<Option<String>> {
+    let mut cmd = Command::new(ytdlp_path);
+    cmd.args([
+        "--simulate",
+        "--no-warnings",
+        "--extractor-args",
+        "youtube:player_client=android,tv,ios,web_safari",
+    ])
+    .arg(video_url)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let output = match output_retrying_busy(&mut cmd) {
+        Ok(output) => output,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(anyhow!(
+                "`yt-dlp` was not found at {}. Install yt-dlp there or run update-ytdlp before running yarrtube.",
+                ytdlp_path.display()
+            ));
+        }
+        Err(e) => {
+            return Err(anyhow!(
+                "Failed to run yt-dlp diagnostic probe for {video_url}: {e}"
+            ));
+        }
+    };
+
+    Ok(extract_reason(&output.stderr))
+}
+
+/// Extracts the human-readable failure reason from a diagnostic probe's
+/// stderr. `yt-dlp` writes `ERROR: [<extractor>] <id>: <reason>`; this returns
+/// `<reason>`, or `None` when there is no error line or the only reason is a
+/// bare "Video unavailable" with no further detail (too generic to act on).
+fn extract_reason(stderr: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+    let reason = text
+        .lines()
+        .filter_map(error_line_reason)
+        .map(str::trim)
+        .find(|reason| !reason.is_empty())?;
+    (!is_bare_video_unavailable(reason)).then(|| reason.to_string())
+}
+
+/// The reason text of a single `ERROR:` stderr line, with the
+/// `ERROR: [<extractor>] <id>: ` prefix stripped; `None` for a non-error line.
+fn error_line_reason(line: &str) -> Option<&str> {
+    let after_error = line.trim().strip_prefix("ERROR:")?.trim_start();
+    Some(strip_extractor_prefix(after_error))
+}
+
+/// Strips a leading `[<extractor>] <id>: ` prefix, leaving the reason; any
+/// text not in that shape is returned unchanged.
+fn strip_extractor_prefix(text: &str) -> &str {
+    text.strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .and_then(|(_, after)| after.split_once(": "))
+        .map_or(text, |(_, reason)| reason)
+}
+
+fn is_bare_video_unavailable(reason: &str) -> bool {
+    reason
+        .trim_end_matches('.')
+        .trim()
+        .eq_ignore_ascii_case("video unavailable")
 }
 
 /// Removes a video's folder after a failed/errored download attempt,
@@ -836,6 +918,8 @@ mod tests {
 
         let mut expected = args_for_quality(Quality::High);
         expected.extend([
+            "--concurrent-fragments".to_string(),
+            "4".to_string(),
             "--embed-thumbnail".to_string(),
             "--write-thumbnail".to_string(),
             "--convert-thumbnails".to_string(),
@@ -907,6 +991,8 @@ mod tests {
 
         let mut expected = args_for_quality(Quality::High);
         expected.extend([
+            "--concurrent-fragments".to_string(),
+            "4".to_string(),
             "--embed-thumbnail".to_string(),
             "--write-thumbnail".to_string(),
             "--convert-thumbnails".to_string(),
@@ -1132,6 +1218,106 @@ mod tests {
         assert_eq!(result, DownloadAttempt::Failed { stderr: None });
         assert!(output_dir.join("My Video").join("My Video.jpg").exists());
         std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn fake_ytdlp_writing_stderr(
+        dir_name: &str,
+        stderr: &str,
+        exit_code: i32,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin_dir = test_support::unique_temp_dir(dir_name);
+        let script_path = bin_dir.join("yt-dlp");
+        let stderr_path = bin_dir.join("stderr-content");
+        std::fs::write(&stderr_path, stderr).unwrap();
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\ncat \"{}\" >&2\nexit {exit_code}\n",
+                stderr_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script_path
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_return_the_precise_reason_a_diagnostic_probe_prints() {
+        let script_path = fake_ytdlp_writing_stderr(
+            "ytdlp-diagnose-reason",
+            "ERROR: [youtube] abc123: Join this channel to get access to members-only content like this video, and other exclusive perks.\n",
+            1,
+        );
+
+        let result = diagnose(&script_path, "https://example.com/video").unwrap();
+
+        assert_eq!(
+            result,
+            Some(
+                "Join this channel to get access to members-only content like this video, and other exclusive perks."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_return_none_when_a_diagnostic_probe_finds_only_a_bare_video_unavailable() {
+        let script_path = fake_ytdlp_writing_stderr(
+            "ytdlp-diagnose-bare",
+            "ERROR: [youtube] abc123: Video unavailable\n",
+            1,
+        );
+
+        let result = diagnose(&script_path, "https://example.com/video").unwrap();
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_return_none_when_a_diagnostic_probe_exits_cleanly() {
+        let fake = test_support::FakeYtDlp::with_stdout("");
+
+        let result = diagnose(&fake.path, "https://example.com/video").unwrap();
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_pass_the_simulate_and_alternate_client_flags_to_the_diagnostic_probe() {
+        let fake = test_support::FakeYtDlp::with_stdout("");
+
+        diagnose(&fake.path, "https://example.com/video").unwrap();
+
+        assert_eq!(
+            fake.captured_args(),
+            vec![
+                "--simulate".to_string(),
+                "--no-warnings".to_string(),
+                "--extractor-args".to_string(),
+                "youtube:player_client=android,tv,ios,web_safari".to_string(),
+                "https://example.com/video".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_error_when_no_binary_exists_at_the_configured_path_for_a_diagnostic_probe() {
+        use test_support::unique_temp_dir;
+
+        let dir = unique_temp_dir("ytdlp-diagnose-missing-binary");
+        let missing_path = dir.join("does-not-exist");
+
+        let result = diagnose(&missing_path, "https://example.com/video");
+
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

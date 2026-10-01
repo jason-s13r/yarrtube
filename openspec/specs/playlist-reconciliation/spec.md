@@ -206,7 +206,7 @@ previous title may be writing into.
 - **THEN** the system records the new title, and does not treat the folder named after the previous title as orphaned
 
 ### Requirement: Permanently Failed Video Recovery
-The system SHALL, for every playlist regardless of kind, during each reconcile pass reset any video that has been permanently errored for at least 24 hours back to PENDING and trigger a fresh download of it. A video that became permanently errored less than 24 hours before the pass SHALL be left permanently errored and SHALL NOT have a download triggered by that pass. There is no limit on how many times a given video may be recovered this way.
+The system SHALL, for every playlist regardless of kind, during each reconcile pass reset any video that has been permanently errored for at least 24 hours back to PENDING and trigger a fresh download of it. A video that became permanently errored less than 24 hours before the pass SHALL be left permanently errored and SHALL NOT have a download triggered by that pass. There is no limit on how many times a given video may be recovered this way. An excluded video SHALL NOT be recovered by this pass regardless of how long ago it was excluded.
 
 #### Scenario: Permanently errored video found during reconcile
 - **WHEN** a reconcile pass finds a video that has been permanently errored for 24 hours or more
@@ -219,6 +219,10 @@ The system SHALL, for every playlist regardless of kind, during each reconcile p
 #### Scenario: Video errors again after being recovered
 - **WHEN** a video that was previously reset by reconcile-driven recovery fails and permanently errors again
 - **THEN** it is recovered again by the first reconcile pass that runs at least 24 hours after it errored, the same as any other permanently errored video
+
+#### Scenario: Excluded video is never recovered
+- **WHEN** a reconcile pass finds an excluded video, however long ago it was excluded
+- **THEN** the system leaves the video excluded and does not trigger a download for it
 
 ### Requirement: On-Demand Reconciliation
 The system SHALL provide an HTTP endpoint that runs one reconcile pass for a

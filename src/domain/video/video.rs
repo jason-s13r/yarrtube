@@ -114,6 +114,19 @@ impl Video {
         }
     }
 
+    /// Marks a video excluded: a terminal status for a video that can never
+    /// be downloaded (see the `video-download` capability). Deliberately
+    /// leaves `last_errored_at` untouched — recovery keys off `Errored`, and
+    /// `Excluded` is a distinct status outside that predicate, so an excluded
+    /// video is never reset by reconcile recovery.
+    pub fn mark_excluded(self, now: DateTime<Utc>) -> Self {
+        Self {
+            status: VideoStatus::Excluded,
+            updated_at: now,
+            ..self
+        }
+    }
+
     /// Records a thumbnail fetched independently of, and ahead of, the
     /// video's full download — see the `video-thumbnails` capability.
     /// Touches only `thumbnail_filename`/`updated_at`, leaving `status`,
@@ -407,6 +420,23 @@ mod tests {
     }
 
     #[test]
+    fn it_should_transition_to_excluded_when_marked_excluded() {
+        let now = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let video = video();
+
+        let excluded = video.clone().mark_excluded(now);
+
+        assert_eq!(
+            excluded,
+            Video {
+                status: VideoStatus::Excluded,
+                updated_at: now,
+                ..video
+            }
+        );
+    }
+
+    #[test]
     fn it_should_keep_when_it_last_errored_when_reset_for_redownload() {
         let errored_at = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
         let later = DateTime::<Utc>::from_timestamp(200, 0).unwrap();
@@ -469,6 +499,21 @@ mod tests {
         assert!(
             !video.is_due_for_recovery(errored_at + Duration::hours(24) - Duration::seconds(1))
         );
+    }
+
+    #[test]
+    fn it_should_never_be_due_for_recovery_if_excluded() {
+        let errored_at = DateTime::<Utc>::from_timestamp(100, 0).unwrap();
+        let long_after = errored_at + Duration::days(3650);
+
+        let excluded = Video {
+            status: VideoStatus::Excluded,
+            updated_at: errored_at,
+            last_errored_at: Some(errored_at),
+            ..video()
+        };
+
+        assert!(!excluded.is_due_for_recovery(long_after));
     }
 
     #[test]

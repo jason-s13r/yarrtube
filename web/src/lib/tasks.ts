@@ -9,6 +9,8 @@ export function describeTask(task: Task): string {
       return `Syncing playlist ${payload.playlist_name ?? 'an unknown playlist'}`
     case 'reconcile_channel':
       return `Syncing channel ${payload.channel_name ?? 'an unknown channel'}`
+    case 'reconcile_plex_collections':
+      return 'Syncing Plex collections'
     case 'download_video': {
       const video = payload.video_title ?? 'a video'
       const container =
@@ -30,8 +32,61 @@ export function describeTask(task: Task): string {
       if (task.task_type === 'update_ytdlp') {
         return 'Updating yt-dlp'
       }
-      return task.task_type
+      return humanizeType(task.task_type)
   }
+}
+
+/** Turns an unknown raw task type into a readable sentence, never snake_case. */
+function humanizeType(type: string): string {
+  const words = type.replace(/_/g, ' ').trim()
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Task'
+}
+
+export type TaskFamily = 'downloads' | 'syncs' | 'cleanup' | 'maintenance'
+export type TaskTab = 'active' | 'downloads' | 'syncs' | 'cleanup' | 'all'
+
+export const TASK_TABS: readonly TaskTab[] = ['active', 'downloads', 'syncs', 'cleanup', 'all']
+
+/** Above this many tasks in a tab, the search field is worth showing. */
+export const TASK_SEARCH_THRESHOLD = 15
+
+const FAMILY_BY_TYPE: Record<string, TaskFamily> = {
+  download_video: 'downloads',
+  fetch_thumbnail: 'downloads',
+  reconcile_playlist: 'syncs',
+  reconcile_channel: 'syncs',
+  reconcile_plex_collections: 'syncs',
+  delete_video_file: 'cleanup',
+  delete_playlist_files: 'cleanup',
+  delete_channel_files: 'cleanup',
+}
+
+export function taskFamily(task: Task): TaskFamily {
+  return FAMILY_BY_TYPE[task.task_type] ?? 'maintenance'
+}
+
+export function tasksForTab(tasks: Task[], tab: TaskTab): Task[] {
+  const inTab =
+    tab === 'all'
+      ? tasks
+      : tab === 'active'
+        ? tasks.filter((task) => task.status === 'running')
+        : tasks.filter((task) => taskFamily(task) === tab)
+  return [...inTab].sort(byCategory)
+}
+
+export function tabCounts(tasks: Task[]): Record<TaskTab, number> {
+  return TASK_TABS.reduce(
+    (counts, tab) => {
+      counts[tab] = tasksForTab(tasks, tab).length
+      return counts
+    },
+    {} as Record<TaskTab, number>,
+  )
+}
+
+export function matchesTask(task: Task, text: string): boolean {
+  return describeTask(task).toLowerCase().includes(text.toLowerCase())
 }
 
 export type TaskCategory = 'running' | 'queued' | 'pending' | string

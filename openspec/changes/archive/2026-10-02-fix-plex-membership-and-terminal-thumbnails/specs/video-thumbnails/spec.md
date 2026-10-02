@@ -1,28 +1,4 @@
-# video-thumbnails Specification
-
-## Purpose
-
-Captures a thumbnail image for every downloaded video — embedded directly in the video file and written as a matching sibling image file — so the video has visual cover art usable by media players, media servers, and a future video list UI, without any extra download step.
-
-## Requirements
-
-### Requirement: Thumbnail Embedded In Video File
-The system SHALL embed the video's thumbnail image as cover art in the downloaded video file itself, whenever a thumbnail is available for that video.
-
-#### Scenario: Video downloaded with a thumbnail available
-- **WHEN** a video download succeeds and a thumbnail is available for it
-- **THEN** the saved video file has that thumbnail embedded as its cover art
-
-### Requirement: Thumbnail File Written Alongside Video
-The system SHALL, whenever a thumbnail is available for a downloaded video, write it to the video's own output folder as a `.jpg` file sharing the exact same base filename (everything before the extension) as the video's own saved file.
-
-#### Scenario: Video downloaded with a thumbnail available
-- **WHEN** a video download succeeds and a thumbnail is available for it
-- **THEN** a `.jpg` file is written in that video's own output folder, named identically to the video file except for its extension
-
-#### Scenario: Thumbnail unavailable for an otherwise successful download
-- **WHEN** a video download succeeds but no thumbnail could be obtained for it
-- **THEN** no thumbnail file is written, and the video download is not treated as failed
+## MODIFIED Requirements
 
 ### Requirement: Thumbnail Fetched Ahead Of Video Download
 The system SHALL fetch a video's thumbnail image independently of its full video download, as a separately scheduled task, so a thumbnail can be available while the video is still pending or in progress. The thumbnail fetch SHALL be scheduled as soon as the video is newly added to a tracked playlist or channel, in reaction to that addition, and SHALL NOT be performed while the video's record is being created. The fetch SHALL be best-effort:
@@ -55,10 +31,3 @@ A thumbnail fetch that runs after the video already has a recorded thumbnail fil
 #### Scenario: Fetch runs for an errored video
 - **WHEN** a thumbnail fetch runs for a video whose download status is Errored
 - **THEN** the fetch does not try to obtain a thumbnail and makes no changes to the video or to disk
-
-### Requirement: Thumbnail Recording Preserves Download Progress
-Recording a fetched thumbnail's filename on a video SHALL change only that video's recorded thumbnail filename (and its last-updated time), never its download status or any field set by its download.
-
-#### Scenario: Download progresses while a thumbnail is recorded
-- **WHEN** a video's status changes (e.g. its download starts or completes) between the time a thumbnail fetch reads the video and the time it records the thumbnail
-- **THEN** the video keeps its new status and download fields, and gains the recorded thumbnail filename

@@ -237,6 +237,17 @@ pub struct FetchedThumbnail {
     pub filename: String,
 }
 
+/// A thumbnail-only fetch's outcome: the thumbnail was written, or none could
+/// be obtained, carrying `yt-dlp`'s reported error text when it reported one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThumbnailFetch {
+    Fetched(FetchedThumbnail),
+    /// Clean yt-dlp failure, or success that printed no thumbnail.
+    Unavailable {
+        reason: Option<String>,
+    },
+}
+
 /// Runs `yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg`
 /// for `video_url` inside the video's own dedicated folder under
 /// `output_path` — sibling to `download_video`, reusing the same
@@ -253,9 +264,12 @@ pub struct FetchedThumbnail {
 /// when the extractor has no thumbnail to write, cleanly distinguishing
 /// "no thumbnail for this video" from a systemic failure.
 ///
-/// Returns `Ok(Some(FetchedThumbnail))` when a thumbnail was written,
-/// `Ok(None)` for a clean `yt-dlp` exit with no thumbnail available (either
-/// a non-zero exit, or a successful exit that printed no usable filename) —
+/// Returns `Ok(ThumbnailFetch::Fetched(..))` when a thumbnail was written,
+/// `Ok(ThumbnailFetch::Unavailable { .. })` for a clean `yt-dlp` exit with
+/// no thumbnail available (either a non-zero exit, carrying its
+/// warning-free stderr as `reason`, or a successful exit that printed no
+/// usable filename) — stderr is captured, never inherited, so none of it
+/// reaches the daemon's own output —
 /// this is expected and routine, not an error, since a thumbnail is
 /// optional even on a clean run. Returns `Err` only for a systemic problem:
 /// no binary at `ytdlp_path`, or a failure creating the video's folder.
@@ -272,7 +286,7 @@ pub fn fetch_thumbnail(
     video_id: &str,
     output_path: &Path,
     existing_folder: Option<&str>,
-) -> Result<Option<FetchedThumbnail>> {
+) -> Result<ThumbnailFetch> {
     let VideoDir {
         folder,
         path: video_dir,
@@ -295,7 +309,7 @@ pub fn fetch_thumbnail(
     .arg(&output_template)
     .current_dir(&video_dir)
     .stdout(Stdio::piped())
-    .stderr(Stdio::inherit());
+    .stderr(Stdio::piped());
     let output = match run_and_cleanup_on_failure(
         &mut cmd,
         &video_dir,
@@ -309,7 +323,11 @@ pub fn fetch_thumbnail(
         |e| format!("Failed to run yt-dlp thumbnail fetch for {video_url}: {e}"),
     )? {
         RunOutcome::Success(output) => output,
-        RunOutcome::CleanFailure { .. } => return Ok(None),
+        RunOutcome::CleanFailure { stderr_raw } => {
+            return Ok(ThumbnailFetch::Unavailable {
+                reason: reason_excluding_warnings(&stderr_raw),
+            });
+        }
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -325,10 +343,13 @@ pub fn fetch_thumbnail(
     };
 
     match filename {
-        Some(filename) => Ok(Some(FetchedThumbnail { folder, filename })),
+        Some(filename) => Ok(ThumbnailFetch::Fetched(FetchedThumbnail {
+            folder,
+            filename,
+        })),
         None => {
             remove_video_dir_unless_reused(&video_dir, existing_folder);
-            Ok(None)
+            Ok(ThumbnailFetch::Unavailable { reason: None })
         }
     }
 }
@@ -439,11 +460,12 @@ struct FlatPlaylistEntry {
 
 /// Lists a channel's `limit` most recent uploads via
 /// `yt-dlp --flat-playlist --print-json -I 1:<limit>` against `channel_url`,
-/// parsing one JSON object per stdout line. A clean non-zero exit or empty
-/// output means "no videos" (`Ok(vec![])`), not an error — mirroring
-/// `download_video`'s error posture. Returns `Err` only for a systemic
-/// problem: no binary at `ytdlp_path`, or output that doesn't parse as one
-/// JSON object per line.
+/// parsing one JSON object per stdout line. Empty output means "no videos"
+/// (`Ok(vec![])`). Returns `Err` when `yt-dlp` exits non-zero (carrying its
+/// warning-free stderr as the reason, so a failed listing is never mistaken
+/// for an empty channel), when there's no binary at `ytdlp_path`, or for
+/// output that doesn't parse as one JSON object per line. stderr is
+/// captured, never inherited, so none of it reaches the daemon's own output.
 pub fn list_channel_videos(
     ytdlp_path: &Path,
     channel_url: &str,
@@ -460,7 +482,7 @@ pub fn list_channel_videos(
     ])
     .arg(channel_url)
     .stdout(Stdio::piped())
-    .stderr(Stdio::inherit());
+    .stderr(Stdio::piped());
     let output = match output_retrying_busy(&mut cmd) {
         Ok(output) => output,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -473,7 +495,11 @@ pub fn list_channel_videos(
     };
 
     if !output.status.success() {
-        return Ok(Vec::new());
+        let reason = reason_excluding_warnings(&String::from_utf8_lossy(&output.stderr))
+            .unwrap_or_else(|| "no error reported".to_string());
+        return Err(anyhow!(
+            "yt-dlp failed to list channel videos for {channel_url}: {reason}"
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1566,7 +1592,7 @@ mod tests {
 
         assert_eq!(
             result,
-            Some(FetchedThumbnail {
+            ThumbnailFetch::Fetched(FetchedThumbnail {
                 folder: "My Video".to_string(),
                 filename: "My Video.jpg".to_string(),
             })
@@ -1612,7 +1638,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn it_should_return_none_and_remove_the_folder_when_yt_dlp_prints_na() {
+    fn it_should_return_unavailable_without_a_reason_when_yt_dlp_prints_na() {
         use test_support::{FakeYtDlp, unique_temp_dir};
 
         let output_dir = unique_temp_dir("ytdlp-thumbnail-na");
@@ -1628,21 +1654,25 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result, None);
+        assert_eq!(result, ThumbnailFetch::Unavailable { reason: None });
         assert!(!output_dir.join("My Video").exists());
         std::fs::remove_dir_all(&output_dir).unwrap();
     }
 
     #[test]
     #[cfg(unix)]
-    fn it_should_return_none_and_remove_the_folder_on_a_clean_failed_exit() {
-        use test_support::{FakeYtDlp, unique_temp_dir};
+    fn it_should_return_unavailable_with_the_reason_on_a_clean_failed_thumbnail_fetch() {
+        use test_support::unique_temp_dir;
 
         let output_dir = unique_temp_dir("ytdlp-thumbnail-failed-exit");
-        let fake = FakeYtDlp::with_exit_code(1);
+        let script_path = fake_ytdlp_writing_stderr(
+            "ytdlp-thumbnail-failed-exit-bin",
+            "WARNING: [youtube] x: some warning\nERROR: [youtube] x: Video unavailable\n",
+            1,
+        );
 
         let result = fetch_thumbnail(
-            &fake.path,
+            &script_path,
             "https://example.com/video",
             "My Video",
             "vid1",
@@ -1651,7 +1681,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result, None);
+        assert_eq!(
+            result,
+            ThumbnailFetch::Unavailable {
+                reason: Some("ERROR: [youtube] x: Video unavailable".to_string()),
+            }
+        );
         assert!(!output_dir.join("My Video").exists());
         std::fs::remove_dir_all(&output_dir).unwrap();
     }
@@ -1676,7 +1711,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result, None);
+        assert_eq!(result, ThumbnailFetch::Unavailable { reason: None });
         assert!(output_dir.join("My Video").join("My Video.mp4").exists());
         std::fs::remove_dir_all(&output_dir).unwrap();
     }
@@ -1761,10 +1796,15 @@ mod tests {
             &output_dir,
             None,
         )
-        .unwrap()
         .unwrap();
 
-        assert_eq!(result.folder, "My Video [vid1]");
+        assert_eq!(
+            result,
+            ThumbnailFetch::Fetched(FetchedThumbnail {
+                folder: "My Video [vid1]".to_string(),
+                filename: "My Video [vid1].jpg".to_string(),
+            })
+        );
         assert!(
             fake.captured_args()
                 .contains(&"My Video [vid1].%(ext)s".to_string())
@@ -1792,10 +1832,15 @@ mod tests {
             &output_dir,
             Some("My Video"),
         )
-        .unwrap()
         .unwrap();
 
-        assert_eq!(result.folder, "My Video");
+        assert_eq!(
+            result,
+            ThumbnailFetch::Fetched(FetchedThumbnail {
+                folder: "My Video".to_string(),
+                filename: "My Video.jpg".to_string(),
+            })
+        );
         assert!(
             fake.captured_args()
                 .contains(&"My Video.%(ext)s".to_string())
@@ -1907,17 +1952,24 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn it_should_return_an_empty_list_on_a_clean_failed_exit() {
-        let fake = test_support::FakeYtDlp::with_exit_code(1);
+    fn it_should_error_with_the_reason_when_listing_channel_videos_fails() {
+        let script_path = fake_ytdlp_writing_stderr(
+            "ytdlp-channel-videos-failed-exit",
+            "ERROR: [youtube:tab] @somechannel: This channel does not exist\n",
+            1,
+        );
 
-        let videos = list_channel_videos(
-            &fake.path,
+        let result = list_channel_videos(
+            &script_path,
             "https://www.youtube.com/@somechannel/videos",
             10,
         )
-        .unwrap();
+        .map_err(|e| e.to_string());
 
-        assert!(videos.is_empty());
+        assert_eq!(
+            result,
+            Err("yt-dlp failed to list channel videos for https://www.youtube.com/@somechannel/videos: ERROR: [youtube:tab] @somechannel: This channel does not exist".to_string())
+        );
     }
 
     #[test]

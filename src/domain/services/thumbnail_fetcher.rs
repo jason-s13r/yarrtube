@@ -7,7 +7,7 @@ use crate::domain::video::video_filename::VideoFilename;
 use crate::infrastructure::repositories::sqlite_task_repository::TaskRepository;
 use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
 use crate::infrastructure::repositories::youtube_video_downloader_repository::{
-    FetchedThumbnail, VideoDownloaderRepository,
+    FetchedThumbnail, ThumbnailFetch, VideoDownloaderRepository,
 };
 use crate::infrastructure::shared::system_clock::Clock;
 use std::collections::HashSet;
@@ -44,7 +44,8 @@ impl ThumbnailFetcher {
 }
 
 pub trait ThumbnailFetcherApi: Send + Sync {
-    /// No-ops if `video` already has a recorded thumbnail. Otherwise fetches
+    /// No-ops if `video` already has a recorded thumbnail or is no longer
+    /// thumbnail-fetchable (`Video::is_thumbnail_fetchable`). Otherwise fetches
     /// one into `output_dir` and persists it via `Video::with_thumbnail` on
     /// success; any failure (a clean "no thumbnail available" outcome, or a
     /// systemic error) is logged and swallowed, leaving `video` untouched.
@@ -58,7 +59,8 @@ pub trait ThumbnailFetcherApi: Send + Sync {
     /// reconcilers' `reconcile_filesystem`: schedules a `FetchThumbnail` for
     /// each video with no thumbnail, except one in `skip_ids` (just reset for
     /// redownload this same pass, so its download writes its own thumbnail)
-    /// or one whose download is `InProgress` (it records its own thumbnail).
+    /// or one whose download is `InProgress` (it records its own thumbnail),
+    /// or one that isn't thumbnail-fetchable (`Video::is_thumbnail_fetchable`).
     /// A video that already has a fetch pending or running gets no second
     /// one: `TaskRepository::schedule` dedupes it.
     fn schedule_missing(
@@ -71,13 +73,17 @@ pub trait ThumbnailFetcherApi: Send + Sync {
 
 impl ThumbnailFetcherApi for ThumbnailFetcher {
     fn fetch(&self, video: &Video, output_dir: &Path) {
-        if video.thumbnail_filename.is_some() {
+        if video.thumbnail_filename.is_some() || !video.is_thumbnail_fetchable() {
             return;
         }
 
         match self.fetch_thumbnail(video, output_dir) {
-            Ok(Some(fetched)) => self.record_thumbnail(video, fetched),
-            Ok(None) => warn!(video_id = %video.id, "no thumbnail available for video"),
+            Ok(ThumbnailFetch::Fetched(fetched)) => self.record_thumbnail(video, fetched),
+            Ok(ThumbnailFetch::Unavailable { reason }) => warn!(
+                video_id = %video.id,
+                reason = reason.as_deref(),
+                "no thumbnail available for video"
+            ),
             Err(e) => {
                 warn!(video_id = %video.id, error = %e, "failed to fetch video thumbnail");
             }
@@ -96,6 +102,7 @@ impl ThumbnailFetcherApi for ThumbnailFetcher {
                 v.thumbnail_filename.is_none()
                     && !skip_ids.contains(&v.id)
                     && v.status != VideoStatus::InProgress
+                    && v.is_thumbnail_fetchable()
             })
             .try_for_each(|video| self.schedule_fetch(video, output_dir))
     }
@@ -103,11 +110,7 @@ impl ThumbnailFetcherApi for ThumbnailFetcher {
 
 impl ThumbnailFetcher {
     /// Reuses `video`'s already-recorded folder, if any.
-    fn fetch_thumbnail(
-        &self,
-        video: &Video,
-        output_dir: &Path,
-    ) -> anyhow::Result<Option<FetchedThumbnail>> {
+    fn fetch_thumbnail(&self, video: &Video, output_dir: &Path) -> anyhow::Result<ThumbnailFetch> {
         let existing_folder = video.filename.as_deref().map(top_level_entry);
         let filename = VideoFilename::from_title(&video.title);
         self.video_downloader_repository.fetch_thumbnail(

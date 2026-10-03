@@ -1,3 +1,4 @@
+use super::Task;
 use chrono::{DateTime, Duration, Utc};
 
 const MAX_ATTEMPTS: i64 = 5;
@@ -90,6 +91,15 @@ impl ScheduledTask {
     /// (`fail` would dead-letter rather than retry).
     pub fn is_last_attempt(&self) -> bool {
         self.retries + 1 >= MAX_ATTEMPTS
+    }
+
+    /// The video a `download_video` task targets; `None` for any other
+    /// task type.
+    pub fn download_video_id(&self) -> Option<String> {
+        (self.task_type == "download_video")
+            .then(|| Task::decode_download_video_payload(&self.payload).ok())
+            .flatten()
+            .map(|(video_id, _, _)| video_id)
     }
 
     pub fn fail(

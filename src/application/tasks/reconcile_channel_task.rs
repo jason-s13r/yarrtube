@@ -30,6 +30,7 @@ impl TaskHandler for ReconcileChannelTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::tasks::log_capture::captured_log_messages;
     use crate::domain::channel::{Channel, VideoLimit};
     use crate::domain::channel_video::ChannelVideo;
     use crate::domain::event::{DomainEvent, ScheduledEvent};
@@ -332,7 +333,11 @@ mod tests {
         );
         assert_eq!(
             task_repository.list_non_completed().unwrap(),
-            vec![fetch_thumbnail_task(1, &existing.id), next_reconcile(2)]
+            vec![
+                download_video_task(1, &existing.id),
+                fetch_thumbnail_task(2, &existing.id),
+                next_reconcile(3),
+            ]
         );
         assert_eq!(event_repository.list_eligible().unwrap(), vec![]);
     }
@@ -717,6 +722,114 @@ mod tests {
                 ),
                 next_reconcile(2),
             ]
+        );
+    }
+
+    #[test]
+    fn it_should_reschedule_the_download_of_an_errored_retrying_video_with_no_download_task() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let channel_video_repository = Arc::new(SqliteChannelVideoRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(Vec::new()));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let video = my_video()
+            .start_download(a_day_ago())
+            .mark_errored_retrying(a_day_ago());
+        save_channel_video(
+            video_repository.as_ref(),
+            channel_video_repository.as_ref(),
+            &video,
+        );
+        let task = ReconcileChannelTask::new(channel_video_reconciler(
+            &db,
+            channel_repository,
+            video_repository.clone(),
+            channel_video_repository.clone(),
+            Arc::new(FakeChannelVideosRepository::with_videos(vec![
+                listed_video("yt1", "My Video", 0),
+            ])),
+            task_repository.clone(),
+            video_file_repository.clone(),
+        ));
+
+        let result = run(&task, &payload_for("@somechannel"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![
+                download_video_task(1, &video.id),
+                fetch_thumbnail_task(2, &video.id),
+                next_reconcile(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_should_not_reschedule_a_non_terminal_video_whose_download_is_queued() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let channel_video_repository = Arc::new(SqliteChannelVideoRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let video_file_repository = Arc::new(FakeVideoFileRepository::with_listing(Vec::new()));
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let video = my_video()
+            .start_download(a_day_ago())
+            .mark_errored_retrying(a_day_ago());
+        save_channel_video(
+            video_repository.as_ref(),
+            channel_video_repository.as_ref(),
+            &video,
+        );
+        task_repository
+            .schedule(
+                &Task::DownloadVideo {
+                    video_id: video.id.as_str().to_string(),
+                    quality: "high".to_string(),
+                    output_dir: "/videos/creators/somechannel".to_string(),
+                },
+                fixed_timestamp(),
+            )
+            .unwrap();
+        let task = ReconcileChannelTask::new(channel_video_reconciler(
+            &db,
+            channel_repository,
+            video_repository.clone(),
+            channel_video_repository.clone(),
+            Arc::new(FakeChannelVideosRepository::with_videos(vec![
+                listed_video("yt1", "My Video", 0),
+            ])),
+            task_repository.clone(),
+            video_file_repository.clone(),
+        ));
+
+        let mut result = Err(String::new());
+        let logs = captured_log_messages(|| result = run(&task, &payload_for("@somechannel")));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![
+                download_video_task(1, &video.id),
+                fetch_thumbnail_task(2, &video.id),
+                next_reconcile(3),
+            ]
+        );
+        assert!(
+            !logs
+                .iter()
+                .any(|message| message.contains("stranded video found during reconcile"))
         );
     }
 
@@ -1316,7 +1429,11 @@ mod tests {
         );
         assert_eq!(
             task_repository.list_non_completed().unwrap(),
-            vec![fetch_thumbnail_task(1, &video.id), next_reconcile(2)]
+            vec![
+                download_video_task(1, &video.id),
+                fetch_thumbnail_task(2, &video.id),
+                next_reconcile(3),
+            ]
         );
     }
 
@@ -1583,6 +1700,16 @@ mod tests {
             channel_video_repository.as_ref(),
             &video,
         );
+        task_repository
+            .schedule(
+                &Task::DownloadVideo {
+                    video_id: video.id.as_str().to_string(),
+                    quality: "high".to_string(),
+                    output_dir: "/videos/creators/somechannel".to_string(),
+                },
+                fixed_timestamp(),
+            )
+            .unwrap();
         let task = ReconcileChannelTask::new(ChannelVideoReconciler::new(
             channel_repository,
             video_repository.clone(),
@@ -1616,10 +1743,10 @@ mod tests {
             *video_downloader_repository.thumbnail_calls.lock().unwrap(),
             vec![]
         );
-        assert_eq!(video_repository.list().unwrap(), vec![video]);
+        assert_eq!(video_repository.list().unwrap(), vec![video.clone()]);
         assert_eq!(
             task_repository.list_non_completed().unwrap(),
-            vec![next_reconcile(1)]
+            vec![download_video_task(1, &video.id), next_reconcile(2)]
         );
     }
 
@@ -1800,6 +1927,18 @@ mod tests {
                 channel_id: "@somechannel".to_string(),
             },
             fixed_timestamp() + chrono::Duration::seconds(3600),
+        )
+    }
+
+    fn download_video_task(id: i64, video_id: &VideoRecordId) -> ScheduledTask {
+        pending_task(
+            id,
+            &Task::DownloadVideo {
+                video_id: video_id.as_str().to_string(),
+                quality: "high".to_string(),
+                output_dir: "/videos/creators/somechannel".to_string(),
+            },
+            fixed_timestamp(),
         )
     }
 

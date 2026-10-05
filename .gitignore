@@ -28,3 +28,6 @@ smoke-tests/container.log
 
 # Playwright MCP browser tool scratch output
 .playwright-mcp/
+
+# cargo-mutants output
+mutants.out*/

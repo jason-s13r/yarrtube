@@ -2,11 +2,17 @@
 
 ## What this is
 
-Yarrtube downloads every video in a YouTube playlist to a local directory via
-`yt-dlp`. It's packaged as a Docker image meant to run continuously (e.g. on a
-NAS), exposing an HTTP API to track playlists plus a `serve` daemon that syncs
-them on an interval. See `README.md` for the full deployment/runtime story
-(Docker, docker-compose, environment variables, releasing).
+Yarrtube tracks YouTube playlists and channels and downloads their videos to
+a local directory via `yt-dlp`. It's packaged as a Docker image meant to run
+continuously (e.g. on a NAS): a `serve` daemon exposes an HTTP API plus an
+embedded React web UI, syncs tracked sources on an interval, writes NFO
+metadata for Plex/Kodi/Jellyfin, and optionally keeps Plex collections in sync.
+
+Docs: `doc/INSTALLATION.md` (Docker, Compose, every environment variable),
+`doc/DEVELOPMENT.md` (building from source), `doc/PLEX.md` (Plex
+collections), `doc/ARCHITECTURE.md`. Releases are cut by pushing a `vX.Y.Z`
+tag, which triggers `.github/workflows/release.yml` to publish the
+multi-arch image to `ghcr.io`.
 
 ## Commands
 
@@ -69,9 +75,10 @@ Conventions:
 
 ## Local testing
 
-For local testing we can run it by running the script locatged in `scripts/run-local.sh`. We can use this for testing our local changes. If you start it, the sqlite database will be created in the repository root `yarrtube.sqlite3` and the videos will be downloaded into `videos/` folder. Necessary env variables should be already loaded in the shell.
-
-Run the binary directly for local (non-Docker) development:
+To test local changes, run `scripts/run-local.sh`. It rebuilds the web UI,
+loads `.env` and starts `cargo run -- serve`. The SQLite database is created
+in the repository root (`yarrtube.sqlite3`) and videos are downloaded into
+`videos/`. The necessary env variables should already be loaded in the shell.
 
 ## Spec-driven development (OpenSpec)
 

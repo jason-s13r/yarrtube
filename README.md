@@ -13,6 +13,8 @@
     ·
     <a href="doc/ARCHITECTURE.md">Architecture</a>
     ·
+    <a href="doc/DEVELOPMENT.md">Development</a>
+    ·
     <a href="LICENSE">License</a>
     <br />
     <img src="doc/screenshot.jpeg" alt="Yarrtube web UI screenshot" width="600"/>
@@ -21,9 +23,9 @@
 
 # About
 
-Yarrtube is a self-hosted service that watches tracked YouTube playlists and channels and automatically downloads the new videos published.
+Yarrtube is a self-hosted service that watches tracked YouTube playlists and channels and automatically downloads new videos as they're published.
 
-Yarrtube is mainly thought to be installed on your NAS via Docker with the rest of your media stack (Plex, Jellyfin, etc.) but it can also be installed on any laptop.
+Yarrtube is designed to run on your NAS via Docker alongside the rest of your media stack (Plex, Jellyfin, etc.), but it runs on any laptop too.
 
 # Main Features
 

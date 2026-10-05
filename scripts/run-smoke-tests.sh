@@ -63,18 +63,17 @@ docker build -t "$IMAGE_TAG" "$REPO_ROOT"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 TMP_DIR="$(mktemp -d /tmp/yarrtube-smoke.XXXXXX)"
-mkdir -p "$TMP_DIR/videos" "$TMP_DIR/data"
+mkdir -p "$TMP_DIR/videos" "$TMP_DIR/config"
 
 echo "==> starting container on port $PORT"
 docker run -d --name "$CONTAINER_NAME" \
   -p "$PORT:$PORT" \
   -e YOUTUBE_API_KEY \
   -e "YARRTUBE_PORT=$PORT" \
-  -e YARRTUBE_DB_PATH=/data/yarrtube.sqlite3 \
   -e YARRTUBE_VIDEOS_PATH=/videos \
   -e "YARRTUBE_RETRY_BASE_DELAY_SECONDS=${SMOKE_RETRY_BASE_DELAY_SECONDS:-10}" \
   -v "$TMP_DIR/videos:/videos" \
-  -v "$TMP_DIR/data:/data" \
+  -v "$TMP_DIR/config:/config" \
   "$IMAGE_TAG" >/dev/null
 CONTAINER_STARTED=true
 

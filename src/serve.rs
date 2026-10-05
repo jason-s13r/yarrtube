@@ -92,11 +92,9 @@ fn videos_path() -> String {
     std::env::var("YARRTUBE_VIDEOS_PATH").unwrap_or_else(|_| DEFAULT_VIDEOS_PATH.to_string())
 }
 
-/// Container-local and un-mounted, unlike `videos_path()` — see design.md's
-/// "Avatar bytes are downloaded and written to a new container-local
-/// `avatars/` directory" decision: it lives alongside the (also
-/// container-local, un-mounted) SQLite database, not under the mounted
-/// videos root.
+/// Lives alongside the SQLite database, not under the videos root. The Docker
+/// image sets both to `/config` (see the Dockerfile's `ENV`) so they persist
+/// on the same volume; the relative default only applies outside Docker.
 fn avatars_path() -> PathBuf {
     std::env::var("YARRTUBE_AVATARS_PATH")
         .map(PathBuf::from)

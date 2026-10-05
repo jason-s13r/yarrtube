@@ -9,6 +9,7 @@ import { AddChannelDialog } from './components/AddChannelDialog'
 import { AddPlaylistDialog } from './components/AddPlaylistDialog'
 import { Sidebar } from './components/Sidebar'
 import { SettingsMenu } from './components/SettingsMenu'
+import { AnnouncementBar } from './components/AnnouncementBar'
 import { Button } from '@/components/ui/button'
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <div className="flex min-h-dvh flex-col md:h-dvh">
+        <AnnouncementBar />
         <header className="sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-4 border-b border-border bg-background px-4 sm:px-6">
           <Button
             variant="ghost"

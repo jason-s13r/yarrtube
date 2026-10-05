@@ -74,6 +74,21 @@ The system SHALL verify that, at a narrow (mobile) viewport, the sidebar can be 
 - **WHEN** a user viewing the app at a mobile viewport width taps the menu button
 - **THEN** the sidebar becomes visible, and tapping its close control or the overlay hides it again
 
+### Requirement: Announcements Bar Coverage
+The system SHALL verify, through the browser against the real image, that the announcements bar displays, links, dismisses, and persists correctly. The GitHub announcements URL SHALL be stubbed with a fixed fixture so the test does not depend on the live file.
+
+#### Scenario: Show, follow link target, dismiss, persist
+- **WHEN** the announcements URL is stubbed to return `[{"id":"smoke-b","text":"Second [docs](https://example.com/docs)"},{"id":"smoke-a","text":"First"}]` and the user opens `/` in a fresh browser context
+- **THEN** a bar shows `Second docs`, where `docs` is a link to `https://example.com/docs` with `target="_blank"`
+- **WHEN** the user clicks `Dismiss announcement`
+- **THEN** the bar shows `First`
+- **WHEN** the user dismisses it and reloads the page
+- **THEN** no announcements bar is shown
+
+#### Scenario: Announcements fetch fails
+- **WHEN** the announcements URL is stubbed to abort and the user opens `/`
+- **THEN** no announcements bar is shown and the header and sidebar render normally
+
 ### Requirement: Continuous Integration
 The system SHALL run the smoke suite automatically in CI on every pull request and on every push to `main`, using a `YOUTUBE_API_KEY` provided as a repository secret.
 

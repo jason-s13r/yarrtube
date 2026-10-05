@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { vi } from 'vitest'
 import type {
+  Announcement,
   ChannelListItem,
   HomeVideo,
   PlaylistListItem,
@@ -161,6 +162,15 @@ export function aTask(overrides: Partial<Task> = {}): Task {
     created_at: '2026-01-01T00:00:00Z',
     last_error: null,
     payload: {},
+    ...overrides,
+  }
+}
+
+export function anAnnouncement(overrides: Partial<Announcement> = {}): Announcement {
+  uniqueId += 1
+  return {
+    id: `announcement-${uniqueId}`,
+    text: `Announcement ${uniqueId}`,
     ...overrides,
   }
 }

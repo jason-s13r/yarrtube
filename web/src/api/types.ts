@@ -136,3 +136,9 @@ export interface VideoProgress {
 export interface RecordProgressResponse {
   watched: boolean
 }
+
+/** An entry of the repository's `announcements/announcements.json`. */
+export interface Announcement {
+  id: string
+  text: string
+}

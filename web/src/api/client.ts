@@ -1,4 +1,5 @@
 import type {
+  Announcement,
   ChannelListItem,
   ChannelPreview,
   CreatedChannel,
@@ -11,6 +12,7 @@ import type {
   Video,
   VideoProgress,
 } from './types'
+import { parseAnnouncements } from '@/lib/announcements'
 
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'DELETE'
@@ -177,4 +179,16 @@ export function recordVideoProgress(
 export function beaconVideoProgress(youtubeId: string, progress: VideoProgress): void {
   const body = new Blob([JSON.stringify(progress)], { type: 'application/json' })
   navigator.sendBeacon(`/api/videos/${encodeURIComponent(youtubeId)}/progress`, body)
+}
+
+/** Published on the public repository's `main`, so it can be edited without a release. */
+export const ANNOUNCEMENTS_URL =
+  'https://raw.githubusercontent.com/sergigp/yarrtube/main/announcements/announcements.json'
+
+export async function fetchAnnouncements(): Promise<Announcement[]> {
+  const response = await fetch(ANNOUNCEMENTS_URL)
+  if (!response.ok) {
+    throw new Error(`announcements request failed with status ${response.status}`)
+  }
+  return parseAnnouncements(await response.json())
 }

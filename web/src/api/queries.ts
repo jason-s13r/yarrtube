@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import {
+  fetchAnnouncements,
   fetchChannels,
   fetchChannelVideos,
   fetchHomeVideos,
@@ -11,6 +12,7 @@ import {
   previewPlaylist,
 } from './client'
 import type {
+  Announcement,
   ChannelListItem,
   ChannelPreview,
   HomeVideos,
@@ -32,6 +34,7 @@ export const queryKeys = {
   playlistVideos: (id: string) => ['playlists', id, 'videos'] as const,
   recentVideos: ['videos', 'recent'] as const,
   tasks: ['tasks'] as const,
+  announcements: ['announcements'] as const,
   // Outside the `['playlists']` and `['channels']` prefixes so refetching the
   // library leaves them be.
   playlistPreview: (value: string) => ['playlist-preview', value] as const,
@@ -111,6 +114,17 @@ export function useTasks(): UseQueryResult<Task[], Error> {
     queryKey: queryKeys.tasks,
     queryFn: fetchTasks,
     refetchInterval: LIVE_INTERVAL_MS,
+  })
+}
+
+/** Fetched once per page load: announcements change rarely and a stale one is harmless. */
+export function useAnnouncements(): UseQueryResult<Announcement[], Error> {
+  return useQuery({
+    queryKey: queryKeys.announcements,
+    queryFn: fetchAnnouncements,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    retry: false,
   })
 }
 

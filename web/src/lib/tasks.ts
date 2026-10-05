@@ -42,10 +42,10 @@ function humanizeType(type: string): string {
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Task'
 }
 
-export type TaskFamily = 'downloads' | 'syncs' | 'cleanup' | 'maintenance'
-export type TaskTab = 'active' | 'downloads' | 'syncs' | 'cleanup' | 'all'
+export type TaskFamily = 'downloads' | 'syncs' | 'other'
+export type TaskTab = 'active' | 'downloads' | 'syncs' | 'other'
 
-export const TASK_TABS: readonly TaskTab[] = ['active', 'downloads', 'syncs', 'cleanup', 'all']
+export const TASK_TABS: readonly TaskTab[] = ['active', 'downloads', 'syncs', 'other']
 
 /** Above this many tasks in a tab, the search field is worth showing. */
 export const TASK_SEARCH_THRESHOLD = 15
@@ -55,23 +55,17 @@ const FAMILY_BY_TYPE: Record<string, TaskFamily> = {
   fetch_thumbnail: 'downloads',
   reconcile_playlist: 'syncs',
   reconcile_channel: 'syncs',
-  reconcile_plex_collections: 'syncs',
-  delete_video_file: 'cleanup',
-  delete_playlist_files: 'cleanup',
-  delete_channel_files: 'cleanup',
 }
 
 export function taskFamily(task: Task): TaskFamily {
-  return FAMILY_BY_TYPE[task.task_type] ?? 'maintenance'
+  return FAMILY_BY_TYPE[task.task_type] ?? 'other'
 }
 
 export function tasksForTab(tasks: Task[], tab: TaskTab): Task[] {
   const inTab =
-    tab === 'all'
-      ? tasks
-      : tab === 'active'
-        ? tasks.filter((task) => task.status === 'running')
-        : tasks.filter((task) => taskFamily(task) === tab)
+    tab === 'active'
+      ? tasks.filter((task) => task.status === 'running')
+      : tasks.filter((task) => taskFamily(task) === tab)
   return [...inTab].sort(byCategory)
 }
 
@@ -83,6 +77,45 @@ export function tabCounts(tasks: Task[]): Record<TaskTab, number> {
     },
     {} as Record<TaskTab, number>,
   )
+}
+
+export type TaskKind = 'download' | 'sync' | 'delete' | 'maintenance'
+
+const KIND_BY_TYPE: Record<string, TaskKind> = {
+  download_video: 'download',
+  fetch_thumbnail: 'download',
+  reconcile_playlist: 'sync',
+  reconcile_channel: 'sync',
+  reconcile_plex_collections: 'sync',
+  delete_video_file: 'delete',
+  delete_playlist_files: 'delete',
+  delete_channel_files: 'delete',
+}
+
+/** What kind of work a task does, which picks its row icon. */
+export function taskKind(task: Task): TaskKind {
+  return KIND_BY_TYPE[task.task_type] ?? 'maintenance'
+}
+
+export interface SyncTarget {
+  kind: 'playlist' | 'channel'
+  id: string
+}
+
+// Which payload field holds the id each syncable task type targets.
+const SYNC_ID_FIELD: Record<string, { kind: SyncTarget['kind']; field: string }> = {
+  reconcile_playlist: { kind: 'playlist', field: 'playlist_id' },
+  reconcile_channel: { kind: 'channel', field: 'channel_id' },
+}
+
+/** The playlist or channel a Run now on this task would sync, if it offers one. */
+export function syncTarget(task: Task): SyncTarget | null {
+  const target = SYNC_ID_FIELD[task.task_type]
+  const id = target && task.payload[target.field]
+  if (task.status === 'running' || !id) {
+    return null
+  }
+  return { kind: target.kind, id }
 }
 
 export function matchesTask(task: Task, text: string): boolean {

@@ -1,21 +1,25 @@
 import { useState } from 'react'
-import { Download, RotateCw, Trash2, Wrench, type LucideIcon } from 'lucide-react'
-import { useTasks } from '@/api/queries'
+import { Activity, Download, RotateCw, Trash2, Wrench, type LucideIcon } from 'lucide-react'
+import { reconcileChannel, reconcilePlaylist } from '@/api/client'
+import { useInvalidateTasks, useTasks } from '@/api/queries'
 import { formatRelativeTime } from '@/lib/formatDateTime'
 import {
   describeTask,
   matchesTask,
   tabCounts,
+  syncTarget,
   tasksForTab,
   taskCategory,
-  taskFamily,
+  taskKind,
   TASK_SEARCH_THRESHOLD,
   TASK_TABS,
-  type TaskFamily,
+  type SyncTarget,
+  type TaskKind,
   type TaskTab,
 } from '@/lib/tasks'
 import { Beacon } from './Beacon'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
@@ -25,6 +29,9 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+
+// The view keeps to a readable width, centred beside the sidebar.
+const VIEW_WIDTH = 'mx-auto w-full max-w-3xl'
 
 const CATEGORY_BADGE_VARIANT: Record<string, 'default' | 'outline' | 'secondary'> = {
   running: 'default',
@@ -36,14 +43,20 @@ const TAB_LABELS: Record<TaskTab, string> = {
   active: 'Active',
   downloads: 'Downloads',
   syncs: 'Syncs',
-  cleanup: 'Cleanup',
-  all: 'All',
+  other: 'Other',
 }
 
-const FAMILY_ICON: Record<TaskFamily, LucideIcon> = {
+const TAB_ICON: Record<TaskTab, LucideIcon> = {
+  active: Activity,
   downloads: Download,
   syncs: RotateCw,
-  cleanup: Trash2,
+  other: Wrench,
+}
+
+const KIND_ICON: Record<TaskKind, LucideIcon> = {
+  download: Download,
+  sync: RotateCw,
+  delete: Trash2,
   maintenance: Wrench,
 }
 
@@ -53,15 +66,15 @@ export function TasksView() {
   const [search, setSearch] = useState('')
 
   if (error) {
-    return <p className="text-sm text-destructive">Failed to load tasks: {error.message}</p>
+    return <p className={cn(VIEW_WIDTH, 'text-sm text-destructive')}>Failed to load tasks: {error.message}</p>
   }
 
   if (!tasks) {
-    return <p className="text-sm text-muted-foreground">Loading tasks…</p>
+    return <p className={cn(VIEW_WIDTH, 'text-sm text-muted-foreground')}>Loading tasks…</p>
   }
 
   if (tasks.length === 0) {
-    return <p className="text-sm text-muted-foreground">No pending or in-progress tasks.</p>
+    return <p className={cn(VIEW_WIDTH, 'text-sm text-muted-foreground')}>No pending or in-progress tasks.</p>
   }
 
   const counts = tabCounts(tasks)
@@ -73,19 +86,29 @@ export function TasksView() {
   return (
     <TooltipProvider>
       <Tabs
+        className={VIEW_WIDTH}
         value={tab}
         onValueChange={(value) => {
           setTab(value as TaskTab)
           setSearch('')
         }}
       >
-        <TabsList className="w-full">
-          {TASK_TABS.map((value) => (
-            <TabsTrigger key={value} value={value}>
-              {TAB_LABELS[value]}
-              <Badge variant="secondary">{counts[value]}</Badge>
-            </TabsTrigger>
-          ))}
+        <TabsList variant="line">
+          {TASK_TABS.map((value) => {
+            const TabIcon = TAB_ICON[value]
+            return (
+              <TabsTrigger key={value} value={value}>
+                <TabIcon aria-hidden />
+                <span className="sr-only sm:not-sr-only">{TAB_LABELS[value]}</span>
+                <Badge variant={value === tab ? 'default' : 'secondary'} className="tabular-nums">
+                  {counts[value]}
+                </Badge>
+                {value === 'active' && counts.active > 0 && (
+                  <Beacon variant="live" label="Tasks running" />
+                )}
+              </TabsTrigger>
+            )
+          })}
         </TabsList>
         <TabsContent value={tab} className="flex flex-col gap-2">
           {showSearch && (
@@ -109,7 +132,8 @@ export function TasksView() {
             <ul className="flex flex-col divide-y divide-border">
               {rows.map((task, index) => {
                 const category = taskCategory(task)
-                const Icon = FAMILY_ICON[taskFamily(task)]
+                const Icon = KIND_ICON[taskKind(task)]
+                const target = tab === 'syncs' ? syncTarget(task) : null
                 return (
                   <li
                     key={task.id}
@@ -139,6 +163,7 @@ export function TasksView() {
                         {category}
                       </Badge>
                       {task.retries > 0 && <Badge variant="outline">{task.retries} retries</Badge>}
+                      {target && <RunNowButton target={target} name={describeTask(task)} />}
                       <span className="w-16 text-right text-xs text-muted-foreground">
                         {category === 'pending' ? formatRelativeTime(task.run_at) : ''}
                       </span>
@@ -151,5 +176,39 @@ export function TasksView() {
         </TabsContent>
       </Tabs>
     </TooltipProvider>
+  )
+}
+
+function RunNowButton({ target, name }: { target: SyncTarget; name: string }) {
+  const invalidateTasks = useInvalidateTasks()
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  return (
+    <>
+      {error && <span className="text-xs text-destructive">Sync failed: {error}</span>}
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={running}
+        aria-label={`Run now: ${name}`}
+        onClick={async () => {
+          setRunning(true)
+          setError(null)
+          try {
+            await (target.kind === 'playlist'
+              ? reconcilePlaylist(target.id)
+              : reconcileChannel(target.id))
+            await invalidateTasks()
+          } catch (err) {
+            setError(err instanceof Error ? err.message : String(err))
+          } finally {
+            setRunning(false)
+          }
+        }}
+      >
+        <RotateCw className={running ? 'animate-spin' : undefined} />
+        <span className="hidden sm:inline">Run now</span>
+      </Button>
+    </>
   )
 }

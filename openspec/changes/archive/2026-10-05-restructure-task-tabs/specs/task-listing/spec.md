@@ -1,10 +1,4 @@
-# task-listing Specification
-
-## Purpose
-
-Provides an HTTP endpoint to list tasks that have not yet completed, so pending and in-progress work (playlist reconciliation, video downloads, file cleanup) can be watched from a browser.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: List Non-Completed Tasks
 The system SHALL provide an HTTP endpoint that returns every scheduled task whose status is `pending` or `running`, regardless of when it is next due to run, including each task's type, status, retry count, scheduled run time, and — resolved server-side from the task's stored payload at read time — whatever context that payload makes resolvable: the name of the playlist or channel a task concerns, the title of a video being downloaded or having its thumbnail fetched, and the raw filename or output path a file-cleanup task targets. A playlist or channel reconciliation task SHALL also include the identifier of the playlist or channel it reconciles, taken from its stored payload, whether or not that playlist or channel can still be found.

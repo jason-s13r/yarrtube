@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { screen, within } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { TasksView } from './TasksView'
 import { aTask, mockApi, pendingForever, renderWithProviders } from '@/test/helpers'
@@ -100,16 +100,162 @@ describe('TasksView', () => {
     expect(screen.queryByText('Downloading Intro in Chan')).not.toBeInTheDocument()
   })
 
-  it('shows each tab trigger with its task count', async () => {
+  it('shows Active, Downloads, Syncs and Other tabs with counts, and no Cleanup or All tab', async () => {
     mockApi({ 'GET /api/tasks': aMixOfTasks() })
 
     renderWithProviders(<TasksView />)
 
-    expect(await screen.findByRole('tab', { name: /Active/ })).toHaveTextContent('1')
-    expect(screen.getByRole('tab', { name: /Downloads/ })).toHaveTextContent('2')
-    expect(screen.getByRole('tab', { name: /Syncs/ })).toHaveTextContent('1')
-    expect(screen.getByRole('tab', { name: /Cleanup/ })).toHaveTextContent('1')
-    expect(screen.getByRole('tab', { name: /All/ })).toHaveTextContent('5')
+    const tabs = await screen.findAllByRole('tab')
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      'Active1',
+      'Downloads2',
+      'Syncs1',
+      'Other2',
+    ])
+  })
+
+  it('shows a live indicator on the Active tab only while a task is running', async () => {
+    mockApi({ 'GET /api/tasks': aMixOfTasks() })
+    const { unmount } = renderWithProviders(<TasksView />)
+
+    const activeTab = await screen.findByRole('tab', { name: /Active/ })
+    expect(within(activeTab).getByRole('img', { name: 'Tasks running' })).toBeInTheDocument()
+
+    unmount()
+
+    mockApi({
+      'GET /api/tasks': aMixOfTasks().map((task) => ({ ...task, status: 'pending' })),
+    })
+    renderWithProviders(<TasksView />)
+
+    const idleTab = await screen.findByRole('tab', { name: /Active/ })
+    expect(within(idleTab).queryByRole('img', { name: 'Tasks running' })).not.toBeInTheDocument()
+  })
+
+  it('runs a playlist sync now from the Syncs tab and refetches the tasks', async () => {
+    const user = userEvent.setup()
+    const tasks = vi.fn(() => [
+      aTask({
+        id: 1,
+        task_type: 'reconcile_playlist',
+        run_at: '2999-01-01T00:00:00Z',
+        payload: { playlist_id: 'PL1', playlist_name: 'Mix' },
+      }),
+    ])
+    const reconcile = vi.fn(() => null)
+    mockApi({ 'GET /api/tasks': tasks, 'POST /api/playlists/PL1/reconcile': reconcile })
+
+    renderWithProviders(<TasksView />)
+
+    await user.click(await screen.findByRole('tab', { name: /Syncs/ }))
+    await user.click(screen.getByRole('button', { name: 'Run now: Syncing playlist Mix' }))
+
+    expect(reconcile).toHaveBeenCalledOnce()
+    await waitFor(() => expect(tasks).toHaveBeenCalledTimes(2))
+  })
+
+  it('runs a channel sync now from the Syncs tab', async () => {
+    const user = userEvent.setup()
+    const reconcile = vi.fn(() => null)
+    mockApi({
+      'GET /api/tasks': [
+        aTask({
+          id: 1,
+          task_type: 'reconcile_channel',
+          run_at: '2999-01-01T00:00:00Z',
+          payload: { channel_id: '@chan', channel_name: 'Chan' },
+        }),
+      ],
+      'POST /api/channels/%40chan/reconcile': reconcile,
+    })
+
+    renderWithProviders(<TasksView />)
+
+    await user.click(await screen.findByRole('tab', { name: /Syncs/ }))
+    await user.click(screen.getByRole('button', { name: 'Run now: Syncing channel Chan' }))
+
+    expect(reconcile).toHaveBeenCalledOnce()
+  })
+
+  it('disables Run now while the sync is in progress', async () => {
+    const user = userEvent.setup()
+    mockApi({
+      'GET /api/tasks': [
+        aTask({
+          id: 1,
+          task_type: 'reconcile_playlist',
+          run_at: '2999-01-01T00:00:00Z',
+          payload: { playlist_id: 'PL1', playlist_name: 'Mix' },
+        }),
+      ],
+      'POST /api/playlists/PL1/reconcile': pendingForever(),
+    })
+
+    renderWithProviders(<TasksView />)
+
+    await user.click(await screen.findByRole('tab', { name: /Syncs/ }))
+    const runNow = screen.getByRole('button', { name: 'Run now: Syncing playlist Mix' })
+    await user.click(runNow)
+
+    expect(runNow).toBeDisabled()
+  })
+
+  it('shows the failure on the row and lets Run now be retried', async () => {
+    const user = userEvent.setup()
+    const reconcile = vi.fn(() => ({ status: 500, error: 'youtube down' }))
+    mockApi({
+      'GET /api/tasks': [
+        aTask({
+          id: 1,
+          task_type: 'reconcile_playlist',
+          run_at: '2999-01-01T00:00:00Z',
+          payload: { playlist_id: 'PL1', playlist_name: 'Mix' },
+        }),
+      ],
+      'POST /api/playlists/PL1/reconcile': reconcile,
+    })
+
+    renderWithProviders(<TasksView />)
+
+    await user.click(await screen.findByRole('tab', { name: /Syncs/ }))
+    const runNow = screen.getByRole('button', { name: 'Run now: Syncing playlist Mix' })
+    await user.click(runNow)
+
+    const row = screen.getByText('Syncing playlist Mix').closest('li')!
+    expect(await within(row).findByText('Sync failed: youtube down')).toBeInTheDocument()
+    expect(runNow).toBeEnabled()
+
+    await user.click(runNow)
+
+    await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2))
+  })
+
+  it('offers no Run now on a running sync or outside the Syncs tab', async () => {
+    const user = userEvent.setup()
+    mockApi({
+      'GET /api/tasks': [
+        aTask({
+          id: 1,
+          task_type: 'reconcile_channel',
+          status: 'running',
+          payload: { channel_id: '@chan', channel_name: 'Chan' },
+        }),
+        aTask({
+          id: 2,
+          task_type: 'reconcile_plex_collections',
+          run_at: '2999-01-01T00:00:00Z',
+        }),
+        aTask({ id: 3, task_type: 'download_video', run_at: '2999-01-01T00:00:00Z' }),
+      ],
+    })
+
+    renderWithProviders(<TasksView />)
+
+    expect(await screen.findByText('Syncing channel Chan')).toBeInTheDocument()
+    for (const tab of [/Active/, /Syncs/, /Downloads/, /Other/]) {
+      await user.click(screen.getByRole('tab', { name: tab }))
+      expect(screen.queryByRole('button', { name: /Run now/ })).not.toBeInTheDocument()
+    }
   })
 
   it('lists download and thumbnail tasks under Downloads, and no sync or cleanup tasks', async () => {
@@ -210,7 +356,7 @@ describe('TasksView', () => {
     await user.type(await screen.findByRole('searchbox', { name: 'Search tasks' }), 'alpha')
     expect(screen.getByRole('searchbox', { name: 'Search tasks' })).toHaveValue('alpha')
 
-    await user.click(screen.getByRole('tab', { name: /All/ }))
+    await user.click(screen.getByRole('tab', { name: /Downloads/ }))
 
     expect(screen.getByRole('searchbox', { name: 'Search tasks' })).toHaveValue('')
   })

@@ -144,6 +144,15 @@ export function useInvalidateLibrary(): () => Promise<unknown> {
   )
 }
 
+/** Returns a function that refetches the task list, e.g. after a sync run on demand. */
+export function useInvalidateTasks(): () => Promise<unknown> {
+  const queryClient = useQueryClient()
+  return useCallback(
+    () => queryClient.invalidateQueries({ queryKey: queryKeys.tasks }),
+    [queryClient],
+  )
+}
+
 /**
  * Returns a function that wraps an async action so the channel and playlist
  * lists refetch once it succeeds.

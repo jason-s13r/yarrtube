@@ -90,6 +90,7 @@ impl TaskViewSearcher {
     fn resolve_reconcile_playlist(&self, payload: &str) -> anyhow::Result<HashMap<String, String>> {
         let mut view = HashMap::new();
         let playlist_id = PlaylistId::new(Task::decode_reconcile_playlist_payload(payload)?)?;
+        view.insert("playlist_id".to_string(), playlist_id.as_str().to_string());
         if let Some(playlist) = self.playlist_repository.find(&playlist_id)? {
             view.insert(
                 "playlist_name".to_string(),
@@ -102,6 +103,7 @@ impl TaskViewSearcher {
     fn resolve_reconcile_channel(&self, payload: &str) -> anyhow::Result<HashMap<String, String>> {
         let mut view = HashMap::new();
         let channel_id = ChannelHandle::new(Task::decode_reconcile_channel_payload(payload)?)?;
+        view.insert("channel_id".to_string(), channel_id.as_str().to_string());
         if let Some(channel) = self.channel_repository.find(&channel_id)? {
             view.insert("channel_name".to_string(), channel.name.clone());
         }

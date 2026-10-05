@@ -8,6 +8,7 @@ import {
   fetchPlaylists,
   fetchTasks,
   fetchVideos,
+  markVideoWatched,
   previewChannel,
   previewPlaylist,
 } from './client'
@@ -166,6 +167,25 @@ export function useLibraryAction() {
         invalidateLibrary()
       },
     [invalidateLibrary],
+  )
+}
+
+/**
+ * Returns a function that marks a video watched, then refetches the channel
+ * and playlist lists (and their video lists) and the home videos.
+ */
+export function useMarkVideoWatched(): (youtubeId: string) => Promise<void> {
+  const queryClient = useQueryClient()
+  const invalidateLibrary = useInvalidateLibrary()
+  return useCallback(
+    async (youtubeId: string) => {
+      await markVideoWatched(youtubeId)
+      await Promise.all([
+        invalidateLibrary(),
+        queryClient.invalidateQueries({ queryKey: queryKeys.recentVideos }),
+      ])
+    },
+    [queryClient, invalidateLibrary],
   )
 }
 

@@ -79,13 +79,82 @@ describe('ChannelDetail', () => {
 
     await userEvent
       .setup()
-      .click(await screen.findByRole('button', { name: /Second Video/ }))
+      .click(await screen.findByRole('button', { name: '2:00 Second Video' }))
 
     await waitFor(() =>
       expect(document.querySelector('video')?.getAttribute('src')).toBe(
         `/media/${channel.path}/second.mp4`,
       ),
     )
+  })
+
+  it("opening a row's menu does not change the selected video", async () => {
+    const channel = aChannel({ id: 'chan' })
+    renderChannel(
+      {
+        'GET /api/channels': [channel],
+        'GET /api/channels/chan/videos': [
+          aVideo({ title: 'First Video' }),
+          aVideo({ title: 'Second Video' }),
+        ],
+      },
+      '/channels/chan',
+    )
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Actions for Second Video' }))
+
+    expect(await screen.findByRole('menuitem', { name: 'Mark as watched' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'First Video' })).toBeInTheDocument()
+  })
+
+  it('marking a row watched shows its tick', async () => {
+    const channel = aChannel({ id: 'chan' })
+    const first = aVideo({ title: 'First Video' })
+    const second = aVideo({ id: 'second', title: 'Second Video' })
+    let marked = false
+    renderChannel(
+      {
+        'GET /api/channels': [channel],
+        'GET /api/channels/chan/videos': () => [first, { ...second, watched: marked }],
+        'POST /api/videos/second/watched': () => {
+          marked = true
+          return null
+        },
+      },
+      '/channels/chan',
+    )
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Actions for Second Video' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Mark as watched' }))
+
+    // The row's tick comes first in its select button's accessible name.
+    expect(
+      await screen.findByRole('button', { name: /^Watched.*Second Video$/ }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'First Video' })).toBeInTheDocument()
+  })
+
+  it('the selected row shows no menu', async () => {
+    const channel = aChannel({ id: 'chan' })
+    renderChannel(
+      {
+        'GET /api/channels': [channel],
+        'GET /api/channels/chan/videos': [
+          aVideo({ title: 'First Video' }),
+          aVideo({ title: 'Second Video' }),
+        ],
+      },
+      '/channels/chan',
+    )
+
+    const list = await screen.findByRole('list')
+    expect(
+      within(list).queryByRole('button', { name: 'Actions for First Video' }),
+    ).not.toBeInTheDocument()
+    expect(within(list).getByRole('button', { name: 'Actions for Second Video' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Actions for First Video' })).toBeInTheDocument()
   })
 
   it('explains when the selected video is not downloaded yet', async () => {

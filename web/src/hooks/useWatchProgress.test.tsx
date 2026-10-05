@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -28,11 +28,20 @@ function fakeVideoElement({ currentTime = 0, duration = 300, paused = true } = {
     paused: { get: () => state.paused, configurable: true },
     readyState: { get: () => HTMLMediaElement.HAVE_METADATA, configurable: true },
   })
+  element.pause = () => {
+    if (!state.paused) {
+      state.paused = true
+      element.dispatchEvent(new Event('pause'))
+    }
+  }
   return element
 }
 
-function wrapper({ children }: { children: ReactNode }) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function Wrapper({ children }: { children: ReactNode }) {
+  // Kept across re-renders, so a rerender doesn't hand the hook a new client.
+  const [queryClient] = useState(
+    () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+  )
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
 }
 
@@ -41,7 +50,7 @@ describe('useWatchProgress', () => {
     const element = fakeVideoElement()
     const video = aVideo({ id: 'abc', watched: false, position_seconds: 42 })
 
-    renderHook(() => useWatchProgress(element, video), { wrapper })
+    renderHook(() => useWatchProgress(element, video), { wrapper: Wrapper })
 
     expect(element.currentTime).toBe(42)
   })
@@ -50,7 +59,7 @@ describe('useWatchProgress', () => {
     const element = fakeVideoElement()
     const video = aVideo({ id: 'abc', watched: true, position_seconds: 42 })
 
-    renderHook(() => useWatchProgress(element, video), { wrapper })
+    renderHook(() => useWatchProgress(element, video), { wrapper: Wrapper })
 
     expect(element.currentTime).toBe(0)
   })
@@ -59,20 +68,24 @@ describe('useWatchProgress', () => {
     const fetchMock = mockApi({ 'POST /api/videos/abc/progress': { watched: false } })
     const element = fakeVideoElement({ currentTime: 63.9, duration: 300.4 })
     const video = aVideo({ id: 'abc' })
-    renderHook(() => useWatchProgress(element, video), { wrapper })
+    renderHook(() => useWatchProgress(element, video), { wrapper: Wrapper })
 
     element.dispatchEvent(new Event('pause'))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(JSON.parse(init.body as string)).toEqual({ position_seconds: 63, duration_seconds: 300 })
+    expect(JSON.parse(init.body as string)).toEqual({
+      position_seconds: 63,
+      duration_seconds: 300,
+      was_watched: false,
+    })
   })
 
   it('reports pending progress once on unmount, not twice for the same position', async () => {
     const fetchMock = mockApi({ 'POST /api/videos/abc/progress': { watched: false } })
     const element = fakeVideoElement({ currentTime: 63, duration: 300 })
     const video = aVideo({ id: 'abc' })
-    const { unmount } = renderHook(() => useWatchProgress(element, video), { wrapper })
+    const { unmount } = renderHook(() => useWatchProgress(element, video), { wrapper: Wrapper })
 
     element.dispatchEvent(new Event('pause'))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
@@ -85,13 +98,70 @@ describe('useWatchProgress', () => {
     const fetchMock = mockApi({ 'POST /api/videos/abc/progress': { watched: false } })
     const element = fakeVideoElement({ currentTime: 10, duration: Number.NaN })
     const video = aVideo({ id: 'abc' })
-    renderHook(() => useWatchProgress(element, video), { wrapper })
+    renderHook(() => useWatchProgress(element, video), { wrapper: Wrapper })
 
     element.dispatchEvent(new Event('pause'))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(JSON.parse(init.body as string)).toEqual({ position_seconds: 10 })
+    expect(JSON.parse(init.body as string)).toEqual({ position_seconds: 10, was_watched: false })
+  })
+
+  it("reports was_watched as the session's state", async () => {
+    const fetchMock = mockApi({ 'POST /api/videos/abc/progress': { watched: true } })
+    const element = fakeVideoElement({ currentTime: 20, duration: 300 })
+    const video = aVideo({ id: 'abc', watched: true })
+    renderHook(() => useWatchProgress(element, video), { wrapper: Wrapper })
+
+    element.dispatchEvent(new Event('pause'))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({
+      position_seconds: 20,
+      duration_seconds: 300,
+      was_watched: true,
+    })
+  })
+
+  it('pauses, rewinds and reports nothing when the video becomes watched while loaded', () => {
+    const fetchMock = mockApi({})
+    const element = fakeVideoElement({ currentTime: 40, duration: 100, paused: false })
+    const video = aVideo({ id: 'abc', watched: false })
+    const { rerender, unmount } = renderHook(({ current }) => useWatchProgress(element, current), {
+      wrapper: Wrapper,
+      initialProps: { current: video },
+    })
+    element.dispatchEvent(new Event('timeupdate'))
+
+    rerender({ current: { ...video, watched: true } })
+    unmount()
+
+    expect(element.paused).toBe(true)
+    expect(element.currentTime).toBe(0)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('reports was_watched true after a flip once playback moves on', async () => {
+    const fetchMock = mockApi({ 'POST /api/videos/abc/progress': { watched: true } })
+    const element = fakeVideoElement({ currentTime: 40, duration: 100, paused: false })
+    const video = aVideo({ id: 'abc', watched: false })
+    const { rerender } = renderHook(({ current }) => useWatchProgress(element, current), {
+      wrapper: Wrapper,
+      initialProps: { current: video },
+    })
+    rerender({ current: { ...video, watched: true } })
+
+    element.currentTime = 5
+    element.dispatchEvent(new Event('pause'))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({
+      position_seconds: 5,
+      duration_seconds: 100,
+      was_watched: true,
+    })
   })
 
   it('reports through a beacon when the page hides', () => {
@@ -103,7 +173,7 @@ describe('useWatchProgress', () => {
     })
     const element = fakeVideoElement({ currentTime: 30, duration: 300 })
     const video = aVideo({ id: 'abc' })
-    renderHook(() => useWatchProgress(element, video), { wrapper })
+    renderHook(() => useWatchProgress(element, video), { wrapper: Wrapper })
 
     window.dispatchEvent(new Event('pagehide'))
 
@@ -114,7 +184,7 @@ describe('useWatchProgress', () => {
     const fetchMock = mockApi({})
     const element = fakeVideoElement({ currentTime: 10 })
     const video = aVideo({ id: 'abc', status: 'PENDING', filename: null })
-    renderHook(() => useWatchProgress(element, video), { wrapper })
+    renderHook(() => useWatchProgress(element, video), { wrapper: Wrapper })
 
     element.dispatchEvent(new Event('pause'))
 

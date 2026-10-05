@@ -1,4 +1,5 @@
 use crate::domain::video::VideoId;
+use crate::infrastructure::shared::youtube_api_key::YOUTUBE_API_KEY_HEADER;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -68,11 +69,8 @@ impl YoutubeMetadataRepository for YoutubeApiMetadataRepository {
         let client = reqwest::blocking::Client::new();
         let response = client
             .get(&self.base_url)
-            .query(&[
-                ("part", "snippet"),
-                ("id", id.as_str()),
-                ("key", self.api_key.as_str()),
-            ])
+            .query(&[("part", "snippet"), ("id", id.as_str())])
+            .header(YOUTUBE_API_KEY_HEADER, &self.api_key)
             .send()
             .inspect_err(|_| tracing::error!(video_id = %id, "YouTube API request failed"))
             .context("YouTube API request failed")?;
@@ -172,6 +170,9 @@ pub fn map_category_to_genre(category_id: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Nothing listens on port 1, so the request fails before any response.
+    const UNREACHABLE_URL: &str = "http://127.0.0.1:1";
+
     fn published_at() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
             .unwrap()
@@ -187,6 +188,7 @@ mod tests {
                 mockito::Matcher::UrlEncoded("id".into(), "vid1".into()),
                 mockito::Matcher::UrlEncoded("part".into(), "snippet".into()),
             ]))
+            .match_header("x-goog-api-key", "api-key")
             .with_status(200)
             .with_body(
                 r#"{"items": [{"id": "vid1", "snippet": {
@@ -274,6 +276,21 @@ mod tests {
         let id = VideoId::new("vid1").unwrap();
 
         assert!(repository.find(&id).is_err());
+    }
+
+    #[test]
+    fn it_should_keep_the_api_key_out_of_a_connection_error() {
+        let repository = YoutubeApiMetadataRepository::with_base_url(
+            "secret-api-key".to_string(),
+            UNREACHABLE_URL.to_string(),
+        );
+
+        let error = repository.find(&VideoId::new("vid1").unwrap()).unwrap_err();
+
+        assert!(
+            !format!("{error:?}").contains("secret-api-key"),
+            "the API key leaked into: {error:?}"
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::domain::playlist::PlaylistId;
+use crate::infrastructure::shared::youtube_api_key::YOUTUBE_API_KEY_HEADER;
 use anyhow::Context;
 use serde::Deserialize;
 
@@ -62,11 +63,8 @@ impl YoutubePlaylistRepository for YoutubeApiPlaylistRepository {
         let client = reqwest::blocking::Client::new();
         let response = client
             .get(&self.base_url)
-            .query(&[
-                ("part", "snippet,contentDetails"),
-                ("id", id.as_str()),
-                ("key", self.api_key.as_str()),
-            ])
+            .query(&[("part", "snippet,contentDetails"), ("id", id.as_str())])
+            .header(YOUTUBE_API_KEY_HEADER, &self.api_key)
             .send()
             .inspect_err(|_| tracing::error!(playlist_id = %id, "YouTube API request failed"))
             .context("YouTube API request failed")?;
@@ -112,6 +110,9 @@ impl YoutubePlaylistRepository for FakeYoutubePlaylistRepository {
 mod tests {
     use super::*;
 
+    /// Nothing listens on port 1, so the request fails before any response.
+    const UNREACHABLE_URL: &str = "http://127.0.0.1:1";
+
     #[test]
     fn it_should_resolve_the_playlist_title_and_item_count() {
         let mut server = mockito::Server::new();
@@ -121,6 +122,7 @@ mod tests {
                 mockito::Matcher::UrlEncoded("id".into(), "PLexists".into()),
                 mockito::Matcher::UrlEncoded("part".into(), "snippet,contentDetails".into()),
             ]))
+            .match_header("x-goog-api-key", "api-key")
             .with_status(200)
             .with_body(
                 r#"{"items": [{
@@ -162,5 +164,22 @@ mod tests {
         let id = PlaylistId::new("PLmissing").unwrap();
 
         assert_eq!(repository.resolve(&id).unwrap(), None);
+    }
+
+    #[test]
+    fn it_should_keep_the_api_key_out_of_a_connection_error() {
+        let repository = YoutubeApiPlaylistRepository::with_base_url(
+            "secret-api-key".to_string(),
+            UNREACHABLE_URL.to_string(),
+        );
+
+        let error = repository
+            .resolve(&PlaylistId::new("PLexists").unwrap())
+            .unwrap_err();
+
+        assert!(
+            !format!("{error:?}").contains("secret-api-key"),
+            "the API key leaked into: {error:?}"
+        );
     }
 }

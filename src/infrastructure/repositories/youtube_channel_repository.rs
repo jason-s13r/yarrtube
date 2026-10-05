@@ -1,4 +1,5 @@
 use crate::domain::channel::ChannelHandle;
+use crate::infrastructure::shared::youtube_api_key::YOUTUBE_API_KEY_HEADER;
 use anyhow::Context;
 use serde::Deserialize;
 
@@ -87,11 +88,8 @@ impl YoutubeChannelRepository for YoutubeApiChannelRepository {
         let client = reqwest::blocking::Client::new();
         let response = client
             .get(&self.base_url)
-            .query(&[
-                ("part", "id,snippet"),
-                ("forHandle", handle.as_str()),
-                ("key", self.api_key.as_str()),
-            ])
+            .query(&[("part", "id,snippet"), ("forHandle", handle.as_str())])
+            .header(YOUTUBE_API_KEY_HEADER, &self.api_key)
             .send()
             .inspect_err(|_| tracing::error!(handle = %handle, "YouTube API request failed"))
             .context("YouTube API request failed")?;
@@ -134,6 +132,9 @@ impl YoutubeChannelRepository for FakeYoutubeChannelRepository {
 mod tests {
     use super::*;
 
+    /// Nothing listens on port 1, so the request fails before any response.
+    const UNREACHABLE_URL: &str = "http://127.0.0.1:1";
+
     #[test]
     fn it_should_return_the_resolved_channel_when_the_handle_exists() {
         let mut server = mockito::Server::new();
@@ -143,6 +144,7 @@ mod tests {
                 mockito::Matcher::UrlEncoded("forHandle".into(), "@somechannel".into()),
                 mockito::Matcher::UrlEncoded("part".into(), "id,snippet".into()),
             ]))
+            .match_header("x-goog-api-key", "api-key")
             .with_status(200)
             .with_body(r#"{"items": [{"id": "UC123", "snippet": {"title": "Some Channel"}}]}"#)
             .create();
@@ -273,5 +275,22 @@ mod tests {
         let resolved = repository.resolve(&handle).map_err(|e| e.to_string());
 
         assert_eq!(resolved, Ok(None));
+    }
+
+    #[test]
+    fn it_should_keep_the_api_key_out_of_a_connection_error() {
+        let repository = YoutubeApiChannelRepository::with_base_url(
+            "secret-api-key".to_string(),
+            UNREACHABLE_URL.to_string(),
+        );
+
+        let error = repository
+            .resolve(&ChannelHandle::new("@somechannel").unwrap())
+            .unwrap_err();
+
+        assert!(
+            !format!("{error:?}").contains("secret-api-key"),
+            "the API key leaked into: {error:?}"
+        );
     }
 }

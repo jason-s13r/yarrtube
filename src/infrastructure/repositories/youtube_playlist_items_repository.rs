@@ -1,5 +1,6 @@
 use crate::domain::playlist::PlaylistId;
 use crate::infrastructure::shared::error_report;
+use crate::infrastructure::shared::youtube_api_key::YOUTUBE_API_KEY_HEADER;
 use anyhow::{Context, anyhow};
 use serde::Deserialize;
 
@@ -95,7 +96,6 @@ impl YoutubeApiPlaylistItemsRepository {
             ("part", "snippet,status"),
             ("maxResults", "50"),
             ("playlistId", playlist_id),
-            ("key", self.api_key.as_str()),
         ];
         if let Some(token) = page_token {
             query.push(("pageToken", token));
@@ -104,6 +104,7 @@ impl YoutubeApiPlaylistItemsRepository {
         let response = client
             .get(&self.base_url)
             .query(&query)
+            .header(YOUTUBE_API_KEY_HEADER, &self.api_key)
             .send()
             .map_err(|e| anyhow::Error::new(e).context("YouTube API request failed"))
             .inspect_err(|e| {
@@ -219,6 +220,9 @@ impl YoutubePlaylistItemsRepository for FakeYoutubePlaylistItemsRepository {
 mod tests {
     use super::*;
 
+    /// Nothing listens on port 1, so the request fails before any response.
+    const UNREACHABLE_URL: &str = "http://127.0.0.1:1";
+
     #[test]
     fn it_should_combine_multiple_pages_in_order() {
         let mut server = mockito::Server::new();
@@ -288,6 +292,7 @@ mod tests {
                 "part".into(),
                 "snippet,status".into(),
             ))
+            .match_header("x-goog-api-key", "api-key")
             .with_status(200)
             .with_body(
                 r#"{"items": [
@@ -458,5 +463,22 @@ mod tests {
             .unwrap();
 
         assert!(videos.is_empty());
+    }
+
+    #[test]
+    fn it_should_keep_the_api_key_out_of_a_connection_error() {
+        let repository = YoutubeApiPlaylistItemsRepository::with_base_url(
+            "secret-api-key".to_string(),
+            UNREACHABLE_URL.to_string(),
+        );
+
+        let error = repository
+            .list_current_videos(&PlaylistId::new("PL1").unwrap())
+            .unwrap_err();
+
+        assert!(
+            !format!("{error:?}").contains("secret-api-key"),
+            "the API key leaked into: {error:?}"
+        );
     }
 }

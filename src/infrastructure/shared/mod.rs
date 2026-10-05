@@ -4,4 +4,5 @@ pub mod sqlite_connection;
 pub mod sqlite_migrations;
 pub mod system_clock;
 pub mod web_assets;
+pub mod youtube_api_key;
 pub mod ytdlp;

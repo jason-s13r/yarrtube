@@ -10,7 +10,14 @@ describe('VideoDetail', () => {
     // collapsed.
     const video = aVideo({ title: 'My Video', description: 'The description.' })
 
-    renderWithProviders(<VideoDetail basePath="playlists/mix" video={video} />)
+    renderWithProviders(
+      <VideoDetail
+        basePath="playlists/mix"
+        video={video}
+        playbackRate={1}
+        onPlaybackRateChange={() => {}}
+      />,
+    )
 
     expect(screen.getByText('My Video')).toBeInTheDocument()
     expect(screen.queryByText('The description.')).not.toBeInTheDocument()
@@ -24,7 +31,14 @@ describe('VideoDetail', () => {
       filename: 'my-video.mp4',
       description: 'The description.',
     })
-    renderWithProviders(<VideoDetail basePath="playlists/mix" video={video} />)
+    renderWithProviders(
+      <VideoDetail
+        basePath="playlists/mix"
+        video={video}
+        playbackRate={1}
+        onPlaybackRateChange={() => {}}
+      />,
+    )
 
     await userEvent.setup().click(screen.getByRole('button', { name: /More/ }))
 
@@ -40,7 +54,14 @@ describe('VideoDetail', () => {
     const video = aVideo({
       description: 'See https://example.com/page. More text.',
     })
-    renderWithProviders(<VideoDetail basePath="playlists/mix" video={video} />)
+    renderWithProviders(
+      <VideoDetail
+        basePath="playlists/mix"
+        video={video}
+        playbackRate={1}
+        onPlaybackRateChange={() => {}}
+      />,
+    )
 
     await userEvent.setup().click(screen.getByRole('button', { name: /More/ }))
 
@@ -53,7 +74,14 @@ describe('VideoDetail', () => {
 
   it('badges a video that is not downloaded yet', async () => {
     const video = aVideo({ status: 'ERRORED_RETRYING', filename: null })
-    renderWithProviders(<VideoDetail basePath="playlists/mix" video={video} />)
+    renderWithProviders(
+      <VideoDetail
+        basePath="playlists/mix"
+        video={video}
+        playbackRate={1}
+        onPlaybackRateChange={() => {}}
+      />,
+    )
 
     await userEvent.setup().click(screen.getByRole('button', { name: /More/ }))
 
@@ -66,7 +94,14 @@ describe('VideoDetail', () => {
       published_at: '2026-01-02T00:00:00Z',
       synced_at: null,
     })
-    renderWithProviders(<VideoDetail basePath="playlists/mix" video={video} />)
+    renderWithProviders(
+      <VideoDetail
+        basePath="playlists/mix"
+        video={video}
+        playbackRate={1}
+        onPlaybackRateChange={() => {}}
+      />,
+    )
 
     // In a playlist view (no channel prop) the meta line names the channel.
     expect(screen.getByText('The Channel')).toBeInTheDocument()
@@ -78,7 +113,13 @@ describe('VideoDetail', () => {
     const channel = aChannel({ id: 'chan', name: 'The Channel' })
     const video = aVideo({ channel_name: 'The Channel' })
     renderWithProviders(
-      <VideoDetail basePath="channels/chan" video={video} channel={channel} />,
+      <VideoDetail
+        basePath="channels/chan"
+        video={video}
+        channel={channel}
+        playbackRate={1}
+        onPlaybackRateChange={() => {}}
+      />,
     )
 
     expect(screen.getByRole('link', { name: 'The Channel' })).toHaveAttribute(
@@ -91,12 +132,34 @@ describe('VideoDetail', () => {
     const markWatched = vi.fn(() => null)
     mockApi({ 'POST /api/videos/abc/watched': markWatched })
     const video = aVideo({ id: 'abc', title: 'My Video' })
-    renderWithProviders(<VideoDetail basePath="playlists/mix" video={video} />)
+    renderWithProviders(
+      <VideoDetail
+        basePath="playlists/mix"
+        video={video}
+        playbackRate={1}
+        onPlaybackRateChange={() => {}}
+      />,
+    )
     const user = userEvent.setup()
 
     await user.click(screen.getByRole('button', { name: 'Actions for My Video' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Mark as watched' }))
 
     expect(markWatched).toHaveBeenCalledOnce()
+  })
+
+  it('disables the speed control until the video is downloaded', () => {
+    const video = aVideo({ status: 'IN_PROGRESS', filename: null })
+
+    renderWithProviders(
+      <VideoDetail
+        basePath="playlists/mix"
+        video={video}
+        playbackRate={1}
+        onPlaybackRateChange={() => {}}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Playback speed' })).toBeDisabled()
   })
 })

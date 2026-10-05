@@ -29,7 +29,7 @@ impl EventSubscriber for ReconcileOnChannelCreated {
         let Ok(channel_id) = ChannelHandle::new(payload.channel_id) else {
             return Ok(());
         };
-        self.channel_video_reconciler.reconcile(channel_id)
+        self.channel_video_reconciler.initial_reconcile(channel_id)
     }
 }
 
@@ -38,6 +38,8 @@ mod tests {
     use super::*;
     use crate::domain::channel::{Channel, VideoLimit};
     use crate::domain::playlist::PlaylistPath;
+    use crate::domain::services::InternalVideoReconciler;
+    use crate::domain::services::MetadataGenerator;
     use crate::domain::services::ThumbnailFetcher;
     use crate::domain::shared::Quality;
     use crate::domain::task::{ScheduledTask, Task, TaskStatus};
@@ -97,6 +99,54 @@ mod tests {
     }
 
     #[test]
+    fn it_should_fail_if_listing_fails() {
+        let db = TestDatabase::new();
+        let channel_repository = Arc::new(SqliteChannelRepository::new(db.database()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let event_repository = SqliteEventRepository::new(db.database());
+        channel_repository.insert(&channel("@somechannel")).unwrap();
+        let subscriber = ReconcileOnChannelCreated::new(ChannelVideoReconciler::new(
+            channel_repository,
+            video_repository.clone(),
+            Arc::new(SqliteChannelVideoRepository::new(db.database())),
+            Arc::new(FakeChannelVideosRepository::failing()),
+            event_publisher(&db),
+            task_repository.clone(),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository.clone(),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                task_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(ThumbnailFetcher::new(
+                    video_repository.clone(),
+                    Arc::new(FakeVideoDownloaderRepository::default()),
+                    task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+            3600,
+        ));
+
+        let result = handle(&subscriber, r#"{"channel_id": "@somechannel"}"#);
+
+        assert_eq!(result, Err("failed to list channel videos".to_string()));
+        assert_eq!(video_repository.list().unwrap(), vec![]);
+        assert_eq!(task_repository.list_non_completed().unwrap(), vec![]);
+        assert_eq!(event_repository.list_eligible().unwrap(), vec![]);
+    }
+
+    #[test]
     fn it_should_skip_if_invalid_channel_id_provided() {
         let result = handle(&any_subscriber(), r#"{"channel_id": ""}"#);
 
@@ -141,18 +191,26 @@ mod tests {
         ));
         ChannelVideoReconciler::new(
             channel_repository,
-            video_repository,
+            video_repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(db.database())),
             Arc::new(FakeChannelVideosRepository::default()),
-            Arc::new(FakeYoutubeMetadataRepository::default()),
-            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
             event_publisher(db),
-            task_repository,
-            Arc::new(FakeVideoFileRepository::default()),
-            thumbnail_fetcher,
+            task_repository.clone(),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository,
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                task_repository,
+                Arc::new(FakeVideoFileRepository::default()),
+                thumbnail_fetcher,
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
-            "/videos",
         )
     }
 
@@ -171,23 +229,31 @@ mod tests {
             video_repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(unused_connection())),
             Arc::new(FakeChannelVideosRepository::default()),
-            Arc::new(FakeYoutubeMetadataRepository::default()),
-            Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
             Arc::new(SqliteEventPublisher::new(
                 unused_connection(),
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             task_repository.clone(),
-            Arc::new(FakeVideoFileRepository::default()),
-            Arc::new(ThumbnailFetcher::new(
-                video_repository,
-                Arc::new(FakeVideoDownloaderRepository::default()),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository.clone(),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
                 task_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(ThumbnailFetcher::new(
+                    video_repository,
+                    Arc::new(FakeVideoDownloaderRepository::default()),
+                    task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
                 Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
-            "/videos",
         ))
     }
 

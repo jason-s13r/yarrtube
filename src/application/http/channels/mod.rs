@@ -123,10 +123,14 @@ pub async fn mark_channel_watched(
 mod tests {
     use super::*;
     use crate::domain::channel::Channel;
+    use crate::domain::channel::{ChannelCreated, ChannelDeleted};
     use crate::domain::channel_video::ChannelVideo;
+    use crate::domain::channel_video::{VideoAddedToChannel, VideoRemovedFromChannel};
     use crate::domain::event::{DomainEvent, ScheduledEvent};
     use crate::domain::playlist::PlaylistId;
     use crate::domain::playlist_video::PlaylistVideo;
+    use crate::domain::services::InternalVideoReconciler;
+    use crate::domain::services::MetadataGenerator;
     use crate::domain::services::ThumbnailFetcher;
     use crate::domain::video::VideoId;
     use crate::domain::video::{PlaybackPosition, Video};
@@ -1000,10 +1004,10 @@ mod tests {
             event_repository.list_eligible().unwrap(),
             vec![pending_event(
                 1,
-                DomainEvent::VideoAddedToChannel {
+                DomainEvent::VideoAddedToChannel(VideoAddedToChannel {
                     channel_id: "@somechannel".to_string(),
                     video_id: video_id.as_str().to_string(),
-                }
+                })
             )]
         );
     }
@@ -1049,14 +1053,14 @@ mod tests {
             event_repository.list_eligible().unwrap(),
             vec![pending_event(
                 1,
-                DomainEvent::VideoRemovedFromChannel {
+                DomainEvent::VideoRemovedFromChannel(VideoRemovedFromChannel {
                     channel_id: "@somechannel".to_string(),
                     video_id: evicted.id.as_str().to_string(),
                     title: "Video yt_old".to_string(),
                     filename: None,
                     thumbnail_filename: None,
                     was_downloaded: false,
-                }
+                })
             )]
         );
     }
@@ -1189,6 +1193,7 @@ mod tests {
             .save(&PlaylistVideo::create(
                 PlaylistId::new("PL1").unwrap(),
                 playlist_copy.id.clone(),
+                0,
                 fixed_timestamp(),
             ))
             .unwrap();
@@ -1343,18 +1348,26 @@ mod tests {
         ));
         ChannelVideoReconciler::new(
             channel_repository,
-            video_repository,
+            video_repository.clone(),
             channel_video_repository,
             Arc::new(FakeChannelVideosRepository::with_videos(listed_videos)),
-            Arc::new(FakeYoutubeMetadataRepository::default()),
-            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
             event_publisher(db),
-            task_repository,
-            Arc::new(FakeVideoFileRepository::default()),
-            thumbnail_fetcher,
+            task_repository.clone(),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository,
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                task_repository,
+                Arc::new(FakeVideoFileRepository::default()),
+                thumbnail_fetcher,
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
-            "/videos",
         )
     }
 
@@ -1369,20 +1382,28 @@ mod tests {
             video_repository.clone(),
             Arc::new(SqliteChannelVideoRepository::new(unused_connection())),
             Arc::new(FakeChannelVideosRepository::with_videos(Vec::new())),
-            Arc::new(FakeYoutubeMetadataRepository::default()),
-            Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
             unused_event_publisher(),
             task_repository.clone(),
-            Arc::new(FakeVideoFileRepository::default()),
-            Arc::new(ThumbnailFetcher::new(
-                video_repository,
-                Arc::new(FakeVideoDownloaderRepository::default()),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository.clone(),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
                 task_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(ThumbnailFetcher::new(
+                    video_repository,
+                    Arc::new(FakeVideoDownloaderRepository::default()),
+                    task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
                 Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
-            "/videos",
         )
     }
 
@@ -1557,17 +1578,17 @@ mod tests {
     }
 
     fn channel_created(channel_handle: &str) -> DomainEvent {
-        DomainEvent::ChannelCreated {
+        DomainEvent::ChannelCreated(ChannelCreated {
             channel_id: channel_handle.to_string(),
-        }
+        })
     }
 
     fn channel_deleted(channel_handle: &str) -> DomainEvent {
-        DomainEvent::ChannelDeleted {
+        DomainEvent::ChannelDeleted(ChannelDeleted {
             channel_id: channel_handle.to_string(),
             name: "Some Channel".to_string(),
             path: "creators/somechannel".to_string(),
-        }
+        })
     }
 
     fn create_request(channel: &str) -> CreateChannelRequest {

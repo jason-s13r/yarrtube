@@ -1,16 +1,17 @@
 use crate::domain::event::DomainEvent;
+use crate::domain::services::{MetadataGenerator, MetadataGeneratorApi};
 use crate::domain::shared::Quality;
 use crate::domain::video::Video;
+use crate::domain::video::VideoDownloaded;
 use crate::domain::video::VideoRecordId;
 use crate::domain::video::thumbnail_filename::expected_thumbnail_filename;
 use crate::domain::video::top_level_entry;
 use crate::domain::video::video_filename::VideoFilename;
-use crate::domain::video_metadata::{VideoMetadata, build_video_metadata, resolve_sorttitle};
+use crate::domain::video_metadata::VideoMetadata;
 use crate::infrastructure::repositories::filesystem_video_file_repository::VideoFileRepository;
 use crate::infrastructure::repositories::sqlite_playlist_video_repository::PlaylistVideoRepository;
 use crate::infrastructure::repositories::sqlite_video_metadata_repository::VideoMetadataRepository;
 use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
-use crate::infrastructure::repositories::youtube_metadata_repository::YoutubeMetadataRepository;
 use crate::infrastructure::repositories::youtube_video_downloader_repository::{
     DownloadAttempt, DownloadedVideo, VideoDownloaderRepository,
 };
@@ -83,7 +84,7 @@ pub struct VideoDownloader {
     video_downloader_repository: Arc<dyn VideoDownloaderRepository>,
     video_file_repository: Arc<dyn VideoFileRepository>,
     playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
-    youtube_metadata_repository: Arc<dyn YoutubeMetadataRepository>,
+    metadata_generator: Arc<MetadataGenerator>,
     video_metadata_repository: Arc<dyn VideoMetadataRepository>,
     event_publisher: Arc<dyn EventPublisher>,
     clock: Arc<dyn Clock>,
@@ -96,7 +97,7 @@ impl VideoDownloader {
         video_downloader_repository: Arc<dyn VideoDownloaderRepository>,
         video_file_repository: Arc<dyn VideoFileRepository>,
         playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
-        youtube_metadata_repository: Arc<dyn YoutubeMetadataRepository>,
+        metadata_generator: Arc<MetadataGenerator>,
         video_metadata_repository: Arc<dyn VideoMetadataRepository>,
         event_publisher: Arc<dyn EventPublisher>,
         clock: Arc<dyn Clock>,
@@ -106,7 +107,7 @@ impl VideoDownloader {
             video_downloader_repository,
             video_file_repository,
             playlist_video_repository,
-            youtube_metadata_repository,
+            metadata_generator,
             video_metadata_repository,
             event_publisher,
             clock,
@@ -303,11 +304,11 @@ impl VideoDownloader {
     /// Best-effort: the download is already recorded, and losing the event
     /// only skips reacting to it (e.g. asking Plex to scan the folder).
     fn publish_downloaded(&self, video: &Video, output_dir: &Path, folder: &str) {
-        let event = DomainEvent::VideoDownloaded {
+        let event = DomainEvent::VideoDownloaded(VideoDownloaded {
             video_id: video.id.as_str().to_string(),
             output_dir: output_dir.to_string_lossy().to_string(),
             folder: folder.to_string(),
-        };
+        });
         if let Err(e) = self.event_publisher.publish(&event) {
             warn!(video_id = %video.id, error = %e, "failed to publish that the video was downloaded");
         }
@@ -413,42 +414,23 @@ impl VideoDownloader {
         self.video_repository.update(&updated)
     }
 
-    /// Fetches `video`'s YouTube metadata and resolves its `sorttitle` (no
-    /// `thumb` yet) — see design.md's "Failure handling: skip the save
-    /// entirely, never fail the download" decision. Any failure (the YouTube
-    /// fetch or the playlist-position lookup) is logged and swallowed rather
-    /// than propagated: metadata generation never fails or retries the
-    /// download itself, and a skipped/failed attempt self-heals on the next
-    /// reconcile pass (see `PlaylistVideoReconciler`/`ChannelVideoReconciler`).
+    /// Builds `video`'s metadata with its playlist position (no `thumb` yet)
+    /// — see design.md's "Failure handling: skip the save entirely, never
+    /// fail the download" decision. Any failure (the playlist-position lookup
+    /// or the YouTube fetch) is logged and swallowed rather than propagated:
+    /// metadata generation never fails or retries the download itself, and a
+    /// skipped/failed attempt self-heals on the next reconcile pass (see
+    /// `InternalVideoReconciler`).
     fn fetch_metadata(&self, video: &Video) -> Option<VideoMetadata> {
-        let metadata = match self.youtube_metadata_repository.find(&video.youtube_id) {
-            Ok(Some(metadata)) => metadata,
-            Ok(None) => {
-                warn!(video_id = %video.id, "no YouTube metadata found for video, skipping metadata generation");
-                return None;
-            }
-            Err(e) => {
-                warn!(video_id = %video.id, error = %e, "failed to fetch YouTube metadata, skipping metadata generation");
-                return None;
-            }
-        };
-
         let playlist_position = match self.playlist_video_repository.find_by_video(&video.id) {
-            Ok(playlist_video) => playlist_video.and_then(|pv| pv.position),
+            Ok(playlist_video) => playlist_video.map(|pv| pv.position),
             Err(e) => {
                 warn!(video_id = %video.id, error = %e, "failed to look up playlist position, falling back to publish-date sorttitle");
                 None
             }
         };
-        let sorttitle =
-            resolve_sorttitle(&metadata.title, metadata.published_at, playlist_position);
-        Some(build_video_metadata(
-            &video.youtube_id,
-            &metadata,
-            sorttitle,
-            None,
-            self.clock.now(),
-        ))
+        self.metadata_generator
+            .generate(video, playlist_position, None)
     }
 
     /// Saves the downloaded `video`'s `movie.nfo` and records its metadata,

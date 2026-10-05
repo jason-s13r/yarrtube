@@ -101,7 +101,11 @@ mod tests {
     use super::*;
     use crate::domain::event::{DomainEvent, ScheduledEvent};
     use crate::domain::playlist::{Playlist, PlaylistKind, PlaylistName};
+    use crate::domain::playlist::{PlaylistCreated, PlaylistDeleted};
     use crate::domain::playlist_video::PlaylistVideo;
+    use crate::domain::playlist_video::{VideoAddedToPlaylist, VideoRemovedFromPlaylist};
+    use crate::domain::services::InternalVideoReconciler;
+    use crate::domain::services::MetadataGenerator;
     use crate::domain::services::ThumbnailFetcher;
     use crate::domain::task::{ScheduledTask, Task, TaskStatus};
     use crate::domain::video::Video;
@@ -136,7 +140,7 @@ mod tests {
     use crate::infrastructure::shared::system_clock::FixedClock;
     use chrono::{DateTime, Utc};
     use rusqlite::Connection;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     const DEFAULT_PATH: &str = "music/chill";
 
@@ -600,11 +604,11 @@ mod tests {
             event_repository.list_eligible().unwrap(),
             vec![pending_event(
                 1,
-                DomainEvent::PlaylistDeleted {
+                DomainEvent::PlaylistDeleted(PlaylistDeleted {
                     playlist_id: "PL1".to_string(),
                     name: "Lofi beats".to_string(),
                     path: DEFAULT_PATH.to_string(),
-                }
+                })
             )]
         );
     }
@@ -822,12 +826,7 @@ mod tests {
                 .unwrap(),
             vec![PlaylistVideo {
                 id: 1,
-                ..PlaylistVideo::create_with_position(
-                    playlist_id("PL1"),
-                    video_id.clone(),
-                    0,
-                    fixed_timestamp()
-                )
+                ..PlaylistVideo::create(playlist_id("PL1"), video_id.clone(), 0, fixed_timestamp())
             }]
         );
         assert_eq!(task_repository.list_non_completed().unwrap(), vec![]);
@@ -835,10 +834,10 @@ mod tests {
             event_repository.list_eligible().unwrap(),
             vec![pending_event(
                 1,
-                DomainEvent::VideoAddedToPlaylist {
+                DomainEvent::VideoAddedToPlaylist(VideoAddedToPlaylist {
                     playlist_id: "PL1".to_string(),
                     video_id: video_id.as_str().to_string(),
-                }
+                })
             )]
         );
     }
@@ -883,14 +882,14 @@ mod tests {
             event_repository.list_eligible().unwrap(),
             vec![pending_event(
                 1,
-                DomainEvent::VideoRemovedFromPlaylist {
+                DomainEvent::VideoRemovedFromPlaylist(VideoRemovedFromPlaylist {
                     playlist_id: "PL1".to_string(),
                     video_id: removed.id.as_str().to_string(),
                     title: "Video vid_old".to_string(),
                     filename: None,
                     thumbnail_filename: None,
                     was_downloaded: false,
-                }
+                })
             )]
         );
     }
@@ -998,6 +997,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_keep_videos_on_reconcile_if_listing_fails() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let playlist_video_repository = Arc::new(SqlitePlaylistVideoRepository::new(db.database()));
+        let task_repository = task_repository(&db);
+        let event_repository = SqliteEventRepository::new(db.database());
+        playlist_repository
+            .insert(&playlist("PL1", DEFAULT_PATH))
+            .unwrap();
+        let (existing, existing_playlist_video) = save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            "PL1",
+            "vid_kept",
+            0,
+        );
+        let thumbnail_fetcher = Arc::new(ThumbnailFetcher::new(
+            video_repository.clone(),
+            Arc::new(FakeVideoDownloaderRepository::default()),
+            task_repository.clone(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let playlist_video_reconciler = PlaylistVideoReconciler::new(
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository.clone(),
+            Arc::new(FakeYoutubePlaylistItemsRepository::failing()),
+            event_publisher(&db),
+            task_repository.clone(),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository.clone(),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                task_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
+                thumbnail_fetcher,
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+            3600,
+        );
+
+        let response = reconcile(playlist_video_reconciler, "PL1").await;
+
+        assert_eq!(response, Ok(StatusCode::NO_CONTENT));
+        assert_eq!(video_repository.list().unwrap(), vec![existing.clone()]);
+        assert_eq!(
+            playlist_video_repository
+                .list_for_playlist(&playlist_id("PL1"))
+                .unwrap(),
+            vec![existing_playlist_video]
+        );
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![
+                pending_task(
+                    1,
+                    &Task::DownloadVideo {
+                        video_id: existing.id.as_str().to_string(),
+                        quality: Quality::High.as_str().to_string(),
+                        output_dir: "/videos/music/chill".to_string(),
+                    },
+                    fixed_timestamp(),
+                ),
+                pending_task(
+                    2,
+                    &Task::FetchThumbnail {
+                        video_id: existing.id.as_str().to_string(),
+                        output_dir: "/videos/music/chill".to_string(),
+                    },
+                    fixed_timestamp(),
+                ),
+            ]
+        );
+        assert_eq!(event_repository.list_eligible().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
     async fn it_should_ignore_reconcile_of_a_missing_playlist() {
         let db = TestDatabase::new();
         let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
@@ -1090,20 +1172,28 @@ mod tests {
         ));
         PlaylistVideoReconciler::new(
             playlist_repository,
-            video_repository,
+            video_repository.clone(),
             playlist_video_repository,
-            Arc::new(FakeYoutubePlaylistItemsRepository {
-                videos: Mutex::new(playlist_items),
-            }),
-            Arc::new(FakeYoutubeMetadataRepository::default()),
-            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+            Arc::new(FakeYoutubePlaylistItemsRepository::with_videos(
+                playlist_items,
+            )),
             event_publisher(db),
-            task_repository,
-            Arc::new(FakeVideoFileRepository::default()),
-            thumbnail_fetcher,
+            task_repository.clone(),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository,
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                task_repository,
+                Arc::new(FakeVideoFileRepository::default()),
+                thumbnail_fetcher,
+                Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
+            )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
-            "/videos",
         )
     }
 
@@ -1119,23 +1209,29 @@ mod tests {
             Arc::new(SqlitePlaylistRepository::new(unused_connection())),
             video_repository.clone(),
             Arc::new(SqlitePlaylistVideoRepository::new(unused_connection())),
-            Arc::new(FakeYoutubePlaylistItemsRepository {
-                videos: Mutex::new(Vec::new()),
-            }),
-            Arc::new(FakeYoutubeMetadataRepository::default()),
-            Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
+            Arc::new(FakeYoutubePlaylistItemsRepository::with_videos(Vec::new())),
             unused_event_publisher(),
             task_repository.clone(),
-            Arc::new(FakeVideoFileRepository::default()),
-            Arc::new(ThumbnailFetcher::new(
-                video_repository,
-                Arc::new(FakeVideoDownloaderRepository::default()),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository.clone(),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(unused_connection())),
                 task_repository.clone(),
+                Arc::new(FakeVideoFileRepository::default()),
+                Arc::new(ThumbnailFetcher::new(
+                    video_repository,
+                    Arc::new(FakeVideoDownloaderRepository::default()),
+                    task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
                 Arc::new(FixedClock(fixed_timestamp())),
+                "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
-            "/videos",
         )
     }
 
@@ -1239,7 +1335,7 @@ mod tests {
         );
         video_repository.save(&video).unwrap();
         playlist_video_repository
-            .save(&PlaylistVideo::create_with_position(
+            .save(&PlaylistVideo::create(
                 playlist_id(playlist),
                 video.id.clone(),
                 position,
@@ -1269,9 +1365,9 @@ mod tests {
     }
 
     fn playlist_created(playlist_id: &str) -> DomainEvent {
-        DomainEvent::PlaylistCreated {
+        DomainEvent::PlaylistCreated(PlaylistCreated {
             playlist_id: playlist_id.to_string(),
-        }
+        })
     }
 
     fn create_request(playlist: &str) -> CreatePlaylistRequest {

@@ -296,6 +296,7 @@ mod tests {
             .save(&PlaylistVideo::create(
                 PlaylistId::new("PL1").unwrap(),
                 VideoRecordId::new("rec1").unwrap(),
+                0,
                 fixed_timestamp(),
             ))
             .unwrap();
@@ -349,6 +350,7 @@ mod tests {
             .save(&PlaylistVideo::create(
                 PlaylistId::new("PL1").unwrap(),
                 VideoRecordId::new("rec1").unwrap(),
+                0,
                 fixed_timestamp(),
             ))
             .unwrap();

@@ -11,16 +11,10 @@ use rusqlite::{OptionalExtension, params};
 pub trait PlaylistVideoRepository: Send + Sync {
     /// Insert-or-replace keyed by `(playlist_id, video_id)`.
     fn save(&self, playlist_video: &PlaylistVideo) -> anyhow::Result<()>;
-    fn find_by_youtube_video(
-        &self,
-        playlist_id: &PlaylistId,
-        youtube_video_id: &VideoId,
-    ) -> anyhow::Result<Option<PlaylistVideo>>;
     /// Finds whichever playlist a video belongs to, keyed by the video's own
     /// surrogate ID rather than a `(playlist_id, youtube_video_id)` pair.
     fn find_by_video(&self, video_id: &VideoRecordId) -> anyhow::Result<Option<PlaylistVideo>>;
-    /// Ordered by position (YouTube-defined order), with no-position rows
-    /// sorted last, by insertion order.
+    /// Ordered by position (YouTube-defined order), then by insertion order.
     fn list_for_playlist(&self, playlist_id: &PlaylistId) -> anyhow::Result<Vec<PlaylistVideo>>;
     fn delete(&self, playlist_id: &PlaylistId, youtube_video_id: &VideoId) -> anyhow::Result<()>;
     fn delete_all_for_playlist(&self, playlist_id: &PlaylistId) -> anyhow::Result<()>;
@@ -59,29 +53,6 @@ impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
         Ok(())
     }
 
-    fn find_by_youtube_video(
-        &self,
-        playlist_id: &PlaylistId,
-        youtube_video_id: &VideoId,
-    ) -> anyhow::Result<Option<PlaylistVideo>> {
-        let conn = self.db.read()?;
-        conn.query_row(
-            "SELECT pv.id, pv.playlist_id, pv.video_id, pv.position, pv.created_at
-             FROM playlist_videos pv
-             JOIN videos v ON v.id = pv.video_id
-             WHERE pv.playlist_id = ?1 AND v.youtube_id = ?2",
-            params![playlist_id.as_str(), youtube_video_id.as_str()],
-            row_to_columns,
-        )
-        .optional()
-        .inspect_err(|e| {
-            tracing::error!(playlist_id = %playlist_id, error = %e, "failed to find playlist video")
-        })
-        .context("failed to find playlist video")?
-        .map(columns_to_playlist_video)
-        .transpose()
-    }
-
     fn find_by_video(&self, video_id: &VideoRecordId) -> anyhow::Result<Option<PlaylistVideo>> {
         let conn = self.db.read()?;
         conn.query_row(
@@ -105,7 +76,7 @@ impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
             .prepare(
                 "SELECT id, playlist_id, video_id, position, created_at
                  FROM playlist_videos WHERE playlist_id = ?1
-                 ORDER BY position IS NULL, position ASC, id ASC",
+                 ORDER BY position ASC, id ASC",
             )
             .inspect_err(|e| {
                 tracing::error!(playlist_id = %playlist_id, error = %e, "failed to prepare list-playlist-videos query")
@@ -157,14 +128,14 @@ impl PlaylistVideoRepository for SqlitePlaylistVideoRepository {
     }
 }
 
-type Columns = (i64, String, String, Option<i64>, String);
+type Columns = (i64, String, String, i64, String);
 
 fn row_to_columns(row: &rusqlite::Row) -> rusqlite::Result<Columns> {
     Ok((
         row.get::<_, i64>(0)?,
         row.get::<_, String>(1)?,
         row.get::<_, String>(2)?,
-        row.get::<_, Option<i64>>(3)?,
+        row.get::<_, i64>(3)?,
         row.get::<_, String>(4)?,
     ))
 }
@@ -224,7 +195,7 @@ mod tests {
         let video = seed_video(&repo, "yt1", "First");
         let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
 
-        repo.save(&PlaylistVideo::create_with_position(
+        repo.save(&PlaylistVideo::create(
             playlist_id(),
             video.id.clone(),
             0,
@@ -232,28 +203,13 @@ mod tests {
         ))
         .unwrap();
 
-        let found = repo
-            .find_by_youtube_video(&playlist_id(), &VideoId::new("yt1").unwrap())
-            .unwrap()
-            .unwrap();
-        assert_eq!(found.video_id, video.id);
-        assert_eq!(found.position, Some(0));
-    }
-
-    #[test]
-    fn it_should_round_trip_a_playlist_video_with_no_position() {
-        let repo = repo();
-        let video = seed_video(&repo, "yt1", "First");
-        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-
-        repo.save(&PlaylistVideo::create(playlist_id(), video.id.clone(), now))
-            .unwrap();
-
-        let found = repo
-            .find_by_youtube_video(&playlist_id(), &VideoId::new("yt1").unwrap())
-            .unwrap()
-            .unwrap();
-        assert_eq!(found.position, None);
+        assert_eq!(
+            repo.list_for_playlist(&playlist_id()).unwrap(),
+            vec![PlaylistVideo {
+                id: 1,
+                ..PlaylistVideo::create(playlist_id(), video.id, 0, now)
+            }]
+        );
     }
 
     #[test]
@@ -263,27 +219,12 @@ mod tests {
         let c = seed_video(&repo, "yt_c", "Third");
         let a = seed_video(&repo, "yt_a", "First");
         let b = seed_video(&repo, "yt_b", "Second");
-        repo.save(&PlaylistVideo::create_with_position(
-            playlist_id(),
-            c.id.clone(),
-            2,
-            now,
-        ))
-        .unwrap();
-        repo.save(&PlaylistVideo::create_with_position(
-            playlist_id(),
-            a.id.clone(),
-            0,
-            now,
-        ))
-        .unwrap();
-        repo.save(&PlaylistVideo::create_with_position(
-            playlist_id(),
-            b.id.clone(),
-            1,
-            now,
-        ))
-        .unwrap();
+        repo.save(&PlaylistVideo::create(playlist_id(), c.id.clone(), 2, now))
+            .unwrap();
+        repo.save(&PlaylistVideo::create(playlist_id(), a.id.clone(), 0, now))
+            .unwrap();
+        repo.save(&PlaylistVideo::create(playlist_id(), b.id.clone(), 1, now))
+            .unwrap();
 
         let videos = repo.list_for_playlist(&playlist_id()).unwrap();
 
@@ -297,59 +238,36 @@ mod tests {
     }
 
     #[test]
-    fn it_should_sort_playlist_videos_with_no_position_last() {
-        let repo = repo();
-        let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-        let no_position = seed_video(&repo, "yt_no_position", "No position");
-        let positioned = seed_video(&repo, "yt_positioned", "Positioned");
-        repo.save(&PlaylistVideo::create(
-            playlist_id(),
-            no_position.id.clone(),
-            now,
-        ))
-        .unwrap();
-        repo.save(&PlaylistVideo::create_with_position(
-            playlist_id(),
-            positioned.id.clone(),
-            5,
-            now,
-        ))
-        .unwrap();
-
-        let videos = repo.list_for_playlist(&playlist_id()).unwrap();
-
-        assert_eq!(
-            videos
-                .iter()
-                .map(|pv| pv.video_id.clone())
-                .collect::<Vec<_>>(),
-            vec![positioned.id, no_position.id]
-        );
-    }
-
-    #[test]
     fn it_should_delete_only_the_named_playlist_video() {
         let repo = repo();
         let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
         let one = seed_video(&repo, "yt1", "One");
         let two = seed_video(&repo, "yt2", "Two");
-        repo.save(&PlaylistVideo::create(playlist_id(), one.id.clone(), now))
-            .unwrap();
-        repo.save(&PlaylistVideo::create(playlist_id(), two.id.clone(), now))
-            .unwrap();
+        repo.save(&PlaylistVideo::create(
+            playlist_id(),
+            one.id.clone(),
+            0,
+            now,
+        ))
+        .unwrap();
+        repo.save(&PlaylistVideo::create(
+            playlist_id(),
+            two.id.clone(),
+            0,
+            now,
+        ))
+        .unwrap();
 
         repo.delete(&playlist_id(), &VideoId::new("yt1").unwrap())
             .unwrap();
 
-        assert!(
-            repo.find_by_youtube_video(&playlist_id(), &VideoId::new("yt1").unwrap())
+        assert_eq!(
+            repo.list_for_playlist(&playlist_id())
                 .unwrap()
-                .is_none()
-        );
-        assert!(
-            repo.find_by_youtube_video(&playlist_id(), &VideoId::new("yt2").unwrap())
-                .unwrap()
-                .is_some()
+                .into_iter()
+                .map(|v| v.video_id)
+                .collect::<Vec<_>>(),
+            vec![two.id]
         );
     }
 
@@ -359,12 +277,18 @@ mod tests {
         let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
         let one = seed_video(&repo, "yt1", "One");
         let two = seed_video(&repo, "yt2", "Two");
-        repo.save(&PlaylistVideo::create(playlist_id(), one.id.clone(), now))
-            .unwrap();
+        repo.save(&PlaylistVideo::create(
+            playlist_id(),
+            one.id.clone(),
+            0,
+            now,
+        ))
+        .unwrap();
         let other_playlist_id = PlaylistId::new("PL2").unwrap();
         repo.save(&PlaylistVideo::create(
             other_playlist_id.clone(),
             two.id.clone(),
+            0,
             now,
         ))
         .unwrap();
@@ -376,23 +300,17 @@ mod tests {
     }
 
     #[test]
-    fn it_should_return_none_when_finding_a_missing_playlist_video() {
-        let repo = repo();
-
-        let found = repo
-            .find_by_youtube_video(&playlist_id(), &VideoId::new("yt1").unwrap())
-            .unwrap();
-
-        assert!(found.is_none());
-    }
-
-    #[test]
     fn it_should_find_a_playlist_video_by_its_video_record_id() {
         let repo = repo();
         let video = seed_video(&repo, "yt1", "First");
         let now = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-        repo.save(&PlaylistVideo::create(playlist_id(), video.id.clone(), now))
-            .unwrap();
+        repo.save(&PlaylistVideo::create(
+            playlist_id(),
+            video.id.clone(),
+            0,
+            now,
+        ))
+        .unwrap();
 
         let found = repo.find_by_video(&video.id).unwrap().unwrap();
 

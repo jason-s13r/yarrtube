@@ -350,7 +350,7 @@ mod tests {
             let video = Video::create(VideoId::new(youtube_id).unwrap(), title, fixed_timestamp());
             video_repository.save(&video).unwrap();
             playlist_video_repository
-                .save(&PlaylistVideo::create_with_position(
+                .save(&PlaylistVideo::create(
                     PlaylistId::new("PL1").unwrap(),
                     video.id.clone(),
                     position,
@@ -411,7 +411,7 @@ mod tests {
         ] {
             video_repository.save(&video).unwrap();
             playlist_video_repository
-                .save(&PlaylistVideo::create_with_position(
+                .save(&PlaylistVideo::create(
                     PlaylistId::new("PL1").unwrap(),
                     video.id.clone(),
                     position,
@@ -2277,6 +2277,7 @@ mod tests {
             .save(&PlaylistVideo::create(
                 PlaylistId::new(playlist_id).unwrap(),
                 video.id.clone(),
+                0,
                 fixed_timestamp(),
             ))
             .unwrap();

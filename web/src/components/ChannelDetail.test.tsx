@@ -197,11 +197,44 @@ describe('ChannelDetail', () => {
     )
     const user = userEvent.setup()
 
-    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Channel' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText('Delete "The Channel"?')).toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: 'Delete' }))
 
     expect(await screen.findByText('home page')).toBeInTheDocument()
+  })
+
+  it('marks the channel watched from its page header menu', async () => {
+    const first = aVideo({ title: 'First Video' })
+    const second = aVideo({ title: 'Second Video' })
+    let marked = false
+    renderChannel(
+      {
+        'GET /api/channels': () => [
+          aChannel({ id: 'chan', name: 'The Channel', unwatched_count: marked ? 0 : 2 }),
+        ],
+        'GET /api/channels/chan/videos': () => [
+          { ...first, watched: marked },
+          { ...second, watched: marked },
+        ],
+        'POST /api/channels/chan/watched': () => {
+          marked = true
+          return null
+        },
+      },
+      '/channels/chan',
+    )
+    const user = userEvent.setup()
+
+    expect(await screen.findByText('2 videos · 2 unwatched')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'More actions for The Channel' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Mark all watched' }))
+
+    expect(await screen.findByText('2 videos')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: /^Watched.*Second Video$/ }),
+    ).toBeInTheDocument()
   })
 })

@@ -242,7 +242,59 @@ describe('AddPlaylistDialog', () => {
       playlist: 'PL1',
       path: 'playlists/my-mix',
       quality: 'high',
+      exclude_from_home: false,
     })
+  })
+
+  it('sends exclude_from_home false by default', async () => {
+    const { fetchMock, onOpenChange } = renderDialog({
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+      'POST /api/playlists': aPlaylist(),
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    const submit = screen.getByRole('button', { name: 'Create Playlist' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    const createCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'POST',
+    ) as [string, RequestInit]
+    expect(JSON.parse(createCall[1].body as string)).toMatchObject({ exclude_from_home: false })
+  })
+
+  it('sends exclude_from_home true when "Exclude from home" is checked', async () => {
+    const { fetchMock, onOpenChange } = renderDialog({
+      'GET /api/playlists/preview?playlist=PL1': { id: 'PL1', title: 'My Mix', video_count: 3 },
+      'POST /api/playlists': aPlaylist(),
+    })
+    const user = userEvent.setup()
+
+    await user.type(screen.getByLabelText('Playlist ID or URL'), 'PL1')
+    await user.click(screen.getByRole('button', { name: /Advanced options/ }))
+    await user.click(screen.getByRole('checkbox', { name: 'Exclude from home' }))
+    const submit = screen.getByRole('button', { name: 'Create Playlist' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    await user.click(submit)
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    const createCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'POST',
+    ) as [string, RequestInit]
+    expect(JSON.parse(createCall[1].body as string)).toMatchObject({ exclude_from_home: true })
+  })
+
+  it('explains what "Exclude from home" does', async () => {
+    renderDialog({})
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: /Advanced options/ }))
+
+    expect(screen.getByRole('checkbox', { name: 'Exclude from home' })).toHaveAccessibleDescription(
+      "Videos from this playlist won't show up in home recommendations.",
+    )
   })
 
   it('blocks a playlist that is already tracked', async () => {

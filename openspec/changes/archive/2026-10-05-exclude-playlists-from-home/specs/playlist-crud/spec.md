@@ -1,8 +1,4 @@
-## Purpose
-
-Lets a caller create, delete, and list the playlists the daemon tracks, so a future scheduler has a persisted set of playlists to query and download from.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Create Playlist
 The system SHALL provide an HTTP endpoint that creates a playlist given a `playlist` value that is either a YouTube playlist ID or a YouTube playlist URL, a storage path, a quality tier (`high`, `mid`, or `low`), and an optional `exclude_from_home` boolean that defaults to `false` when omitted. The request SHALL NOT carry a name. The system SHALL extract the playlist ID from the `playlist` value when it is a URL, and SHALL look the resulting YouTube playlist ID up on YouTube before persisting, confirming that it corresponds to an existing, accessible YouTube playlist. It SHALL store the playlist with kind `youtube_linked`, that ID, the playlist's YouTube title as its name, the path, the quality, the `exclude_from_home` setting, and a system-generated creation timestamp. When YouTube reports an empty or blank title, the system SHALL use the playlist ID as the name.
@@ -85,61 +81,6 @@ Every playlist created through this endpoint has kind `youtube_linked`.
 - **WHEN** a request supplies a `playlist` value whose extracted playlist ID does not correspond to an existing, accessible YouTube playlist
 - **THEN** the system rejects the request without persisting anything and returns a bad request with a meaningful error description
 
-### Requirement: Preview a YouTube Playlist
-The system SHALL provide an HTTP endpoint that, given a `playlist` value that is either a YouTube playlist ID or a YouTube playlist URL, looks the playlist up on YouTube and returns its playlist ID, its YouTube title, and the number of videos YouTube reports for it, without persisting anything, publishing any event, or scheduling any task. It applies the same ID extraction and validation as Create Playlist, and the same fallback to the playlist ID when YouTube reports a blank title. The count is YouTube's own item count and may include videos that will not be downloaded, such as private ones.
-
-The preview is independent of what is already tracked: previewing a playlist that is already stored SHALL return its YouTube data like any other.
-
-#### Scenario: Previewing a playlist by ID
-- **WHEN** a request supplies a bare playlist ID of a YouTube playlist titled "Lofi beats" with 42 videos
-- **THEN** the system returns that playlist ID, the title "Lofi beats" and the count 42, and storage is unchanged
-
-#### Scenario: Previewing a playlist by URL
-- **WHEN** a request supplies a YouTube playlist URL (e.g. `https://www.youtube.com/watch?v=vid1&list=PLabc123`)
-- **THEN** the system returns the extracted playlist ID `PLabc123` together with its YouTube title and video count
-
-#### Scenario: Previewing a playlist with a blank title
-- **WHEN** a request identifies a YouTube playlist whose title YouTube reports as empty
-- **THEN** the system returns the playlist ID as the title
-
-#### Scenario: Previewing an invalid value
-- **WHEN** a request supplies an empty value, a URL that is not a recognized YouTube URL, or a YouTube URL without a `list` parameter
-- **THEN** the system returns a bad request with a meaningful error description without contacting YouTube
-
-#### Scenario: Previewing a nonexistent playlist
-- **WHEN** a request supplies a playlist ID that does not correspond to an existing, accessible YouTube playlist
-- **THEN** the system returns a not found response with a meaningful error description
-
-#### Scenario: YouTube unavailable
-- **WHEN** the YouTube lookup itself fails
-- **THEN** the system returns a bad gateway response with a meaningful error description
-
-### Requirement: Unique Playlist Paths
-The system SHALL reject a request to create a playlist whose storage path is already used by a different existing playlist.
-
-#### Scenario: Path already used by another playlist
-- **WHEN** a create request supplies a path that is already the stored path of a different existing playlist
-- **THEN** the system rejects the request without persisting anything and returns a bad request with a meaningful error description
-
-#### Scenario: Re-submitting the same playlist's own path
-- **WHEN** a create request identifies a playlist ID that already exists and supplies that same playlist's own stored path
-- **THEN** the system treats this as the existing idempotent duplicate-ID case and does not reject it under this rule
-
-### Requirement: Delete a Playlist
-The system SHALL provide an HTTP endpoint that deletes a previously created playlist identified by its ID, and SHALL delete every video record stored for that playlist as part of the same operation, so that no video record can ever be observed referencing a playlist that no longer exists.
-
-#### Scenario: Successful deletion
-- **WHEN** a request identifies a playlist ID that exists in storage
-- **THEN** the system removes it, removes every video record stored for it, and confirms the deletion
-
-#### Scenario: Deleting a playlist with videos
-- **WHEN** a request identifies a playlist ID that has one or more video records stored for it, regardless of their download status
-- **THEN** by the time the system confirms the deletion, none of those video records remain in storage
-
-#### Scenario: Deleting a nonexistent playlist
-- **WHEN** a request identifies a playlist ID that does not exist in storage
-- **THEN** the system reports that nothing was found and makes no change to storage, including no change to any video records, and returns a bad request with a meaningful error description
-
 ### Requirement: List All Playlists
 The system SHALL provide an HTTP endpoint that returns every currently stored playlist, sorted alphabetically by name, ignoring case.
 
@@ -155,27 +96,7 @@ The system SHALL provide an HTTP endpoint that returns every currently stored pl
 - **WHEN** playlists named "watch later", "Courses" and "Ambient" were created in that order
 - **THEN** the system returns them in the order "Ambient", "Courses", "watch later"
 
-### Requirement: Playlist Creation Publishes a Domain Event
-The system SHALL publish a PlaylistCreated domain event, containing the playlist's ID, whenever a playlist is newly created — and SHALL NOT publish it when creation is a no-op because the playlist already existed.
-
-#### Scenario: New playlist created
-- **WHEN** a create-playlist request results in a new playlist being persisted
-- **THEN** the system publishes a PlaylistCreated event containing that playlist's ID
-
-#### Scenario: Playlist already existed
-- **WHEN** a create-playlist request identifies a playlist ID that already exists in storage
-- **THEN** the system does not publish a PlaylistCreated event
-
-### Requirement: Playlist Deletion Publishes an Event
-The system SHALL publish a PlaylistDeleted domain event, containing the playlist's ID and its storage path, whenever a playlist is successfully deleted. The path travels with the event because the playlist record itself no longer exists by the time anything reacts to it.
-
-#### Scenario: Existing playlist deleted
-- **WHEN** a delete-playlist request successfully removes a playlist from storage
-- **THEN** the system publishes a PlaylistDeleted event containing that playlist's ID and its storage path
-
-#### Scenario: Deleting a nonexistent playlist
-- **WHEN** a delete-playlist request identifies a playlist ID that does not exist in storage
-- **THEN** the system does not publish a PlaylistDeleted event
+## ADDED Requirements
 
 ### Requirement: Change Whether A Playlist Is Excluded From Home
 The system SHALL provide an HTTP endpoint that changes whether a previously created playlist, identified by its ID, is excluded from home, given a required `exclude_from_home` boolean. It SHALL change only that setting, leaving the playlist's other fields and its video records as they were, and SHALL return the updated playlist. Setting the value the playlist already has SHALL succeed without changing anything.

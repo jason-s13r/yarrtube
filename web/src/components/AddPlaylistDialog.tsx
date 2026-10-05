@@ -78,6 +78,7 @@ export function AddPlaylistDialog({ open, onOpenChange }: AddPlaylistDialogProps
 
 function AddPlaylistForm({ onClose }: { onClose: () => void }) {
   const [form, setForm] = useState({ playlist: '', quality: 'high' })
+  const [excludeFromHome, setExcludeFromHome] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [error, setError] = useState<Error | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -107,6 +108,7 @@ function AddPlaylistForm({ onClose }: { onClose: () => void }) {
         playlist: form.playlist,
         path: location.value.path,
         quality: form.quality,
+        exclude_from_home: excludeFromHome,
       })
       location.remember()
       invalidateLibrary()
@@ -154,6 +156,22 @@ function AddPlaylistForm({ onClose }: { onClose: () => void }) {
             value={form.quality}
             onChange={setField('quality')}
           />
+          <div className="flex items-start gap-2">
+            <input
+              id="add-playlist-exclude-from-home"
+              type="checkbox"
+              className="mt-0.5 size-4 shrink-0 accent-primary"
+              checked={excludeFromHome}
+              onChange={(event) => setExcludeFromHome(event.target.checked)}
+              aria-describedby="add-playlist-exclude-from-home-hint"
+            />
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="add-playlist-exclude-from-home">Exclude from home</Label>
+              <p id="add-playlist-exclude-from-home-hint" className="text-xs text-muted-foreground">
+                Videos from this playlist won't show up in home recommendations.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 

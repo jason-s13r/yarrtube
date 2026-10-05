@@ -10,6 +10,8 @@ const LAST_ERRORED_AT_SQL: &str = include_str!("../../../migrations/0004_last_er
 const LAST_PLAYED_AT_SQL: &str = include_str!("../../../migrations/0005_last_played_at.sql");
 const PLAYLIST_VIDEO_POSITION_REQUIRED_SQL: &str =
     include_str!("../../../migrations/0006_playlist_video_position_required.sql");
+const PLAYLIST_EXCLUDE_FROM_HOME_SQL: &str =
+    include_str!("../../../migrations/0007_playlist_exclude_from_home.sql");
 
 pub fn apply(conn: &mut Connection) -> anyhow::Result<()> {
     Migrations::new(vec![
@@ -19,6 +21,7 @@ pub fn apply(conn: &mut Connection) -> anyhow::Result<()> {
         M::up(LAST_ERRORED_AT_SQL),
         M::up(LAST_PLAYED_AT_SQL),
         M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+        M::up(PLAYLIST_EXCLUDE_FROM_HOME_SQL),
     ])
     .to_latest(conn)
     .inspect_err(|e| tracing::error!(error = %e, "failed to apply database migrations"))
@@ -183,6 +186,36 @@ mod tests {
             result,
             Err("NOT NULL constraint failed: playlist_videos.position".to_string())
         );
+    }
+
+    #[test]
+    fn it_should_default_existing_playlists_to_shown_on_home_when_migrating() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(vec![
+            M::up(BASELINE_SQL),
+            M::up(WATCH_STATE_SQL),
+            M::up(PUBLISHED_AT_AND_SYNCED_AT_SQL),
+            M::up(LAST_ERRORED_AT_SQL),
+            M::up(LAST_PLAYED_AT_SQL),
+            M::up(PLAYLIST_VIDEO_POSITION_REQUIRED_SQL),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        conn.execute(
+            "INSERT INTO playlists (id, name, path, quality, kind, created_at)
+             VALUES ('PL1', 'My Playlist', 'my-playlist', 'high', 'youtube_linked', '2024-01-01T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        let exclude_from_home = conn.query_row(
+            "SELECT exclude_from_home FROM playlists WHERE id = 'PL1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        );
+        assert_eq!(exclude_from_home, Ok(0));
     }
 
     #[test]

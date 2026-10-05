@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import { screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import { screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router-dom'
 import { PlaylistDetail } from './PlaylistDetail'
 import { aPlaylist, aVideo, mockApi, renderWithProviders, type Routes as ApiRoutes } from '@/test/helpers'
@@ -9,6 +10,7 @@ function renderPlaylist(routes: ApiRoutes, route: string) {
   return renderWithProviders(
     <Routes>
       <Route path="/playlists/:id" element={<PlaylistDetail />} />
+      <Route path="/" element={<p>home page</p>} />
     </Routes>,
     { route },
   )
@@ -62,5 +64,92 @@ describe('PlaylistDetail', () => {
       await screen.findByText('No videos recorded for this playlist yet.'),
     ).toBeInTheDocument()
     expect(await screen.findByText('No video selected.')).toBeInTheDocument()
+  })
+
+  it('keeps Sync visible and the other actions in the ⋮ menu', async () => {
+    renderPlaylist(
+      {
+        'GET /api/playlists': [aPlaylist({ id: 'PL1', name: 'The Playlist' })],
+        'GET /api/playlists/PL1/videos': [],
+      },
+      '/playlists/PL1',
+    )
+
+    expect(await screen.findByRole('button', { name: 'Sync' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'More actions for The Playlist' }))
+    expect(await screen.findByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
+  })
+
+  it('excludes the playlist from home from its page header menu', async () => {
+    let playlist = aPlaylist({ id: 'PL1', name: 'The Playlist' })
+    const update = vi.fn(() => {
+      playlist = { ...playlist, exclude_from_home: true }
+      return playlist
+    })
+    renderPlaylist(
+      {
+        'GET /api/playlists': () => [playlist],
+        'GET /api/playlists/PL1/videos': [],
+        'PATCH /api/playlists/PL1': update,
+      },
+      '/playlists/PL1',
+    )
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Playlist' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Exclude from home' }))
+
+    expect(update).toHaveBeenCalledOnce()
+    await user.click(screen.getByRole('button', { name: 'More actions for The Playlist' }))
+    expect(await screen.findByRole('menuitem', { name: 'Include in home' })).toBeInTheDocument()
+  })
+
+  it('deletes the playlist from its page header menu after confirming', async () => {
+    const remove = vi.fn(() => null)
+    renderPlaylist(
+      {
+        'GET /api/playlists': [aPlaylist({ id: 'PL1', name: 'The Playlist' })],
+        'GET /api/playlists/PL1/videos': [],
+        'DELETE /api/playlists/PL1': remove,
+      },
+      '/playlists/PL1',
+    )
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Playlist' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('Delete "The Playlist"?')).toBeInTheDocument()
+    expect(remove).not.toHaveBeenCalled()
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }))
+
+    expect(await screen.findByText('home page')).toBeInTheDocument()
+    expect(remove).toHaveBeenCalledOnce()
+  })
+
+  it("alerts and leaves the playlist as it was when changing its home setting fails", async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    renderPlaylist(
+      {
+        'GET /api/playlists': [aPlaylist({ id: 'PL1', name: 'The Playlist' })],
+        'GET /api/playlists/PL1/videos': [],
+        'PATCH /api/playlists/PL1': { status: 500, error: 'database is locked' },
+      },
+      '/playlists/PL1',
+    )
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'More actions for The Playlist' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Exclude from home' }))
+
+    await waitFor(() =>
+      expect(alert).toHaveBeenCalledWith(
+        'Failed to exclude "The Playlist" from home: database is locked',
+      ),
+    )
+    await user.click(screen.getByRole('button', { name: 'More actions for The Playlist' }))
+    expect(await screen.findByRole('menuitem', { name: 'Exclude from home' })).toBeInTheDocument()
   })
 })

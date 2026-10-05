@@ -26,6 +26,7 @@ export interface PlaylistListItem {
   path: string
   quality: string
   kind: string
+  exclude_from_home: boolean
   created_at: string
 }
 
@@ -36,6 +37,7 @@ export interface LibraryItem {
   path: string
   avatar_filename?: string | null
   unwatched_count?: number
+  exclude_from_home?: boolean
 }
 
 /** An entry of `GET /api/playlists/:id/videos` and `/api/channels/:handle/videos`. */

@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Home } from './Home'
-import { aHomeVideo, mockApi, renderWithProviders } from '@/test/helpers'
+import type { HomeVideoSource } from '@/api/types'
+import { aHomeVideo, aPlaylist, mockApi, renderWithProviders } from '@/test/helpers'
 
 describe('Home', () => {
   it('shows only the latest section while the others are empty', async () => {
@@ -126,5 +127,68 @@ describe('Home', () => {
 
     await waitFor(() => expect(screen.queryByText('Half Watched')).not.toBeInTheDocument())
     expect(screen.queryByText('Continue watching')).not.toBeInTheDocument()
+  })
+
+  it("excluding a card's playlist from home removes its cards", async () => {
+    const bluey: HomeVideoSource = {
+      kind: 'playlist',
+      id: 'bluey',
+      name: 'Bluey',
+      path: 'playlists/bluey',
+      avatar_filename: null,
+    }
+    let excluded = false
+    mockApi({
+      'GET /api/videos/home': () => ({
+        continue_watching: [],
+        quick_watches: excluded ? [] : [aHomeVideo({ title: 'Bluey Short', source: bluey })],
+        latest: [
+          ...(excluded ? [] : [aHomeVideo({ title: 'Bluey Episode', source: bluey })]),
+          aHomeVideo({ title: 'Fresh Video' }),
+        ],
+      }),
+      'PATCH /api/playlists/bluey': () => {
+        excluded = true
+        return aPlaylist({ id: 'bluey', name: 'Bluey', exclude_from_home: true })
+      },
+    })
+    renderWithProviders(<Home />)
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Actions for Bluey Episode' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Exclude "Bluey" from home' }))
+
+    await waitFor(() => expect(screen.queryByText('Bluey Episode')).not.toBeInTheDocument())
+    expect(screen.queryByText('Bluey Short')).not.toBeInTheDocument()
+    expect(screen.getByText('Fresh Video')).toBeInTheDocument()
+  })
+
+  it('a channel card offers no exclude item', async () => {
+    mockApi({
+      'GET /api/videos/home': {
+        continue_watching: [],
+        quick_watches: [],
+        latest: [
+          aHomeVideo({
+            title: 'Channel Video',
+            source: {
+              kind: 'channel',
+              id: 'chan',
+              name: 'The Channel',
+              path: 'channels/chan',
+              avatar_filename: null,
+            },
+          }),
+        ],
+      },
+    })
+    renderWithProviders(<Home />)
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Actions for Channel Video' }))
+
+    expect(
+      (await screen.findAllByRole('menuitem')).map((item) => item.textContent),
+    ).toEqual(['Mark as watched'])
   })
 })

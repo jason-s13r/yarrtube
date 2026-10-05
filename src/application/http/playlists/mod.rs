@@ -2,21 +2,26 @@ pub mod dto;
 
 use super::blocking::run_blocking;
 use super::error::ApiError;
-use super::validation::{MISSING_QUALITY, required};
+use super::validation::{MISSING_EXCLUDE_FROM_HOME, MISSING_QUALITY, required};
 use crate::domain::playlist::PlaylistId;
 use crate::domain::playlist::{
     CreatePlaylistError, DeletePlaylistError, PlaylistPath, PreviewPlaylistError,
+    UpdatePlaylistError,
 };
 use crate::domain::services::{
     CreatePlaylistOutcome, PlaylistCreator, PlaylistCreatorApi, PlaylistDeleter,
     PlaylistDeleterApi, PlaylistPreviewer, PlaylistPreviewerApi, PlaylistSearcher,
-    PlaylistSearcherApi, PlaylistVideoReconciler, PlaylistVideoReconcilerApi,
+    PlaylistSearcherApi, PlaylistUpdater, PlaylistUpdaterApi, PlaylistVideoReconciler,
+    PlaylistVideoReconcilerApi,
 };
 use crate::domain::shared::Quality;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use dto::{CreatePlaylistRequest, PlaylistPreviewResponse, PlaylistResponse, PreviewPlaylistQuery};
+use dto::{
+    CreatePlaylistRequest, PlaylistPreviewResponse, PlaylistResponse, PreviewPlaylistQuery,
+    UpdatePlaylistRequest,
+};
 
 const MISSING_PATH: &str = "Playlist path must not be empty";
 
@@ -27,8 +32,10 @@ pub async fn create_playlist(
     let id = PlaylistId::from_url_or_id(request.playlist)?;
     let path = PlaylistPath::new(required(request.path, MISSING_PATH)?)?;
     let quality = Quality::new(required(request.quality, MISSING_QUALITY)?)?;
+    let exclude_from_home = request.exclude_from_home.unwrap_or(false);
 
-    let outcome = run_blocking(move || playlist_creator.create(id, path, quality)).await?;
+    let outcome =
+        run_blocking(move || playlist_creator.create(id, path, quality, exclude_from_home)).await?;
 
     match outcome {
         Ok(CreatePlaylistOutcome::Created(playlist)) => {
@@ -69,6 +76,23 @@ pub async fn delete_playlist(
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e @ DeletePlaylistError::NotFound(_)) => Err(ApiError::bad_request(e)),
         Err(e @ DeletePlaylistError::Repository(_)) => Err(ApiError::internal(e)),
+    }
+}
+
+pub async fn update_playlist(
+    State(playlist_updater): State<PlaylistUpdater>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdatePlaylistRequest>,
+) -> Result<Json<PlaylistResponse>, ApiError> {
+    let id = PlaylistId::new(id)?;
+    let exclude_from_home = required(request.exclude_from_home, MISSING_EXCLUDE_FROM_HOME)?;
+
+    match run_blocking(move || playlist_updater.update_exclude_from_home(id, exclude_from_home))
+        .await?
+    {
+        Ok(playlist) => Ok(Json(PlaylistResponse::from(playlist))),
+        Err(e @ UpdatePlaylistError::NotFound(_)) => Err(ApiError::new(StatusCode::NOT_FOUND, e)),
+        Err(e @ UpdatePlaylistError::Repository(_)) => Err(ApiError::internal(e)),
     }
 }
 
@@ -209,6 +233,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_create_a_playlist_shown_on_home_by_default() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        let event_repository = SqliteEventRepository::new(db.database());
+        let playlist_creator = PlaylistCreator::new(
+            playlist_repository.clone(),
+            Arc::new(FakeYoutubePlaylistRepository {
+                resolved: Some(resolved_playlist()),
+            }),
+            event_publisher(&db),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+        let request = CreatePlaylistRequest {
+            exclude_from_home: None,
+            ..create_request("PL1")
+        };
+
+        let response = create(playlist_creator, request).await;
+
+        assert_eq!(
+            response,
+            Ok((
+                StatusCode::CREATED,
+                PlaylistResponse {
+                    exclude_from_home: false,
+                    ..playlist_response("PL1", DEFAULT_PATH)
+                }
+            ))
+        );
+        assert_eq!(
+            playlist_repository.list().unwrap(),
+            vec![Playlist {
+                exclude_from_home: false,
+                ..playlist("PL1", DEFAULT_PATH)
+            }]
+        );
+        assert_eq!(
+            event_repository.list_eligible().unwrap(),
+            vec![pending_event(1, playlist_created("PL1"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_create_a_playlist_excluded_from_home() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        let event_repository = SqliteEventRepository::new(db.database());
+        let playlist_creator = PlaylistCreator::new(
+            playlist_repository.clone(),
+            Arc::new(FakeYoutubePlaylistRepository {
+                resolved: Some(resolved_playlist()),
+            }),
+            event_publisher(&db),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+        let request = CreatePlaylistRequest {
+            exclude_from_home: Some(true),
+            ..create_request("PL1")
+        };
+
+        let response = create(playlist_creator, request).await;
+
+        assert_eq!(
+            response,
+            Ok((
+                StatusCode::CREATED,
+                PlaylistResponse {
+                    exclude_from_home: true,
+                    ..playlist_response("PL1", DEFAULT_PATH)
+                }
+            ))
+        );
+        assert_eq!(
+            playlist_repository.list().unwrap(),
+            vec![Playlist {
+                exclude_from_home: true,
+                ..playlist("PL1", DEFAULT_PATH)
+            }]
+        );
+        assert_eq!(
+            event_repository.list_eligible().unwrap(),
+            vec![pending_event(1, playlist_created("PL1"))]
+        );
+    }
+
+    #[tokio::test]
     async fn it_should_name_the_playlist_after_its_id_if_youtube_title_blank() {
         let db = TestDatabase::new();
         let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
@@ -311,6 +421,40 @@ mod tests {
         let request = CreatePlaylistRequest {
             path: Some("different/path".to_string()),
             quality: Some("low".to_string()),
+            ..create_request("PL1")
+        };
+
+        let response = create(playlist_creator, request).await;
+
+        assert_eq!(
+            response,
+            Ok((StatusCode::OK, playlist_response("PL1", DEFAULT_PATH)))
+        );
+        assert_eq!(
+            playlist_repository.list().unwrap(),
+            vec![playlist("PL1", DEFAULT_PATH)]
+        );
+        assert_eq!(event_repository.list_eligible().unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn it_should_keep_exclude_from_home_of_an_existing_playlist_on_duplicate_create() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        let event_repository = SqliteEventRepository::new(db.database());
+        playlist_repository
+            .insert(&playlist("PL1", DEFAULT_PATH))
+            .unwrap();
+        let playlist_creator = PlaylistCreator::new(
+            playlist_repository.clone(),
+            Arc::new(FakeYoutubePlaylistRepository {
+                resolved: Some(resolved_playlist()),
+            }),
+            event_publisher(&db),
+            Arc::new(FixedClock(fixed_timestamp())),
+        );
+        let request = CreatePlaylistRequest {
+            exclude_from_home: Some(true),
             ..create_request("PL1")
         };
 
@@ -750,6 +894,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_should_list_playlists_with_their_exclude_from_home() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        playlist_repository
+            .insert(&playlist("PL1", "music/first"))
+            .unwrap();
+        playlist_repository
+            .insert(&Playlist {
+                exclude_from_home: true,
+                ..playlist("PL2", "music/second")
+            })
+            .unwrap();
+        let playlist_searcher = PlaylistSearcher::new(playlist_repository);
+
+        let response = list(playlist_searcher).await;
+
+        assert_eq!(
+            response,
+            Ok(vec![
+                playlist_response("PL1", "music/first"),
+                PlaylistResponse {
+                    exclude_from_home: true,
+                    ..playlist_response("PL2", "music/second")
+                },
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn it_should_list_playlists_sorted_by_name_ignoring_case() {
         let db = TestDatabase::new();
         let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
@@ -785,6 +958,129 @@ mod tests {
                     ..playlist_response("PL1", "music/list")
                 },
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_exclude_a_playlist_from_home() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        playlist_repository
+            .insert(&playlist("PL1", DEFAULT_PATH))
+            .unwrap();
+        let playlist_updater = PlaylistUpdater::new(playlist_repository.clone());
+
+        let response = update(playlist_updater, "PL1", update_request(true)).await;
+
+        assert_eq!(
+            response,
+            Ok(PlaylistResponse {
+                exclude_from_home: true,
+                ..playlist_response("PL1", DEFAULT_PATH)
+            })
+        );
+        assert_eq!(
+            playlist_repository.list().unwrap(),
+            vec![Playlist {
+                exclude_from_home: true,
+                ..playlist("PL1", DEFAULT_PATH)
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_include_a_playlist_in_home_again() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        playlist_repository
+            .insert(&Playlist {
+                exclude_from_home: true,
+                ..playlist("PL1", DEFAULT_PATH)
+            })
+            .unwrap();
+        let playlist_updater = PlaylistUpdater::new(playlist_repository.clone());
+
+        let response = update(playlist_updater, "PL1", update_request(false)).await;
+
+        assert_eq!(response, Ok(playlist_response("PL1", DEFAULT_PATH)));
+        assert_eq!(
+            playlist_repository.list().unwrap(),
+            vec![playlist("PL1", DEFAULT_PATH)]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_leave_a_playlist_unchanged_if_already_set() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        let excluded = Playlist {
+            exclude_from_home: true,
+            ..playlist("PL1", DEFAULT_PATH)
+        };
+        playlist_repository.insert(&excluded).unwrap();
+        let playlist_updater = PlaylistUpdater::new(playlist_repository.clone());
+
+        let response = update(playlist_updater, "PL1", update_request(true)).await;
+
+        assert_eq!(
+            response,
+            Ok(PlaylistResponse {
+                exclude_from_home: true,
+                ..playlist_response("PL1", DEFAULT_PATH)
+            })
+        );
+        assert_eq!(playlist_repository.list().unwrap(), vec![excluded]);
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_update_an_unknown_playlist() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        playlist_repository
+            .insert(&playlist("PL1", DEFAULT_PATH))
+            .unwrap();
+        let playlist_updater = PlaylistUpdater::new(playlist_repository.clone());
+
+        let response = update(playlist_updater, "PL404", update_request(true)).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "playlist PL404 not found"
+            ))
+        );
+        assert_eq!(
+            playlist_repository.list().unwrap(),
+            vec![playlist("PL1", DEFAULT_PATH)]
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_update_if_exclude_from_home_missing() {
+        let request = UpdatePlaylistRequest {
+            exclude_from_home: None,
+        };
+
+        let response = update(any_playlist_updater(), "PL1", request).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "Whether the playlist is excluded from home must be stated (missing)"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_should_fail_to_update_if_invalid_id_provided() {
+        let response = update(any_playlist_updater(), " ", update_request(true)).await;
+
+        assert_eq!(
+            response,
+            Err(ApiError::bad_request(
+                "YouTube playlist ID must not be empty"
+            ))
         );
     }
 
@@ -1153,6 +1449,12 @@ mod tests {
         )
     }
 
+    /// An updater for tests whose request is rejected before reaching it (see
+    /// `any_playlist_creator`).
+    fn any_playlist_updater() -> PlaylistUpdater {
+        PlaylistUpdater::new(Arc::new(SqlitePlaylistRepository::new(unused_connection())))
+    }
+
     /// Builds a reconciler around the repositories a test seeds and asserts;
     /// the remaining ports (metadata, files, thumbnails) are ones no playlist
     /// reconcile test observes. Events go to `db`'s outbox table.
@@ -1315,6 +1617,7 @@ mod tests {
             PlaylistPath::new(path).unwrap(),
             Quality::High,
             PlaylistKind::YoutubeLinked,
+            false,
             fixed_timestamp(),
         )
     }
@@ -1375,6 +1678,13 @@ mod tests {
             playlist: playlist.to_string(),
             path: Some(DEFAULT_PATH.to_string()),
             quality: Some("high".to_string()),
+            exclude_from_home: None,
+        }
+    }
+
+    fn update_request(exclude_from_home: bool) -> UpdatePlaylistRequest {
+        UpdatePlaylistRequest {
+            exclude_from_home: Some(exclude_from_home),
         }
     }
 
@@ -1399,6 +1709,7 @@ mod tests {
             path: path.to_string(),
             quality: "high".to_string(),
             kind: "youtube_linked".to_string(),
+            exclude_from_home: false,
             created_at: fixed_timestamp(),
         }
     }
@@ -1429,6 +1740,16 @@ mod tests {
         list_playlists(State(playlist_searcher))
             .await
             .map(|Json(playlists)| playlists)
+    }
+
+    async fn update(
+        playlist_updater: PlaylistUpdater,
+        id: &str,
+        request: UpdatePlaylistRequest,
+    ) -> Result<PlaylistResponse, ApiError> {
+        update_playlist(State(playlist_updater), Path(id.to_string()), Json(request))
+            .await
+            .map(|Json(playlist)| playlist)
     }
 
     async fn reconcile(

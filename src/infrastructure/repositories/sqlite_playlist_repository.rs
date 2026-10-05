@@ -11,6 +11,7 @@ use rusqlite::{OptionalExtension, params};
 pub trait PlaylistRepository: Send + Sync {
     fn find(&self, id: &PlaylistId) -> anyhow::Result<Option<Playlist>>;
     fn insert(&self, playlist: &Playlist) -> anyhow::Result<()>;
+    fn update(&self, playlist: &Playlist) -> anyhow::Result<()>;
     fn delete(&self, id: &PlaylistId) -> anyhow::Result<()>;
     fn list(&self) -> anyhow::Result<Vec<Playlist>>;
 }
@@ -29,7 +30,7 @@ impl PlaylistRepository for SqlitePlaylistRepository {
     fn find(&self, id: &PlaylistId) -> anyhow::Result<Option<Playlist>> {
         let conn = self.db.read()?;
         conn.query_row(
-            "SELECT id, name, path, quality, kind, created_at FROM playlists WHERE id = ?1",
+            "SELECT id, name, path, quality, kind, exclude_from_home, created_at FROM playlists WHERE id = ?1",
             params![id.as_str()],
             |row| {
                 Ok((
@@ -38,15 +39,16 @@ impl PlaylistRepository for SqlitePlaylistRepository {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, bool>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             },
         )
         .optional()
         .inspect_err(|e| tracing::error!(playlist_id = %id, error = %e, "failed to query playlist"))
         .context("failed to query playlist")?
-        .map(|(id, name, path, quality, kind, created_at)| {
-            Self::row_to_playlist(id, name, path, quality, kind, created_at)
+        .map(|(id, name, path, quality, kind, exclude_from_home, created_at)| {
+            Self::row_to_playlist(id, name, path, quality, kind, exclude_from_home, created_at)
         })
         .transpose()
     }
@@ -54,18 +56,38 @@ impl PlaylistRepository for SqlitePlaylistRepository {
     fn insert(&self, playlist: &Playlist) -> anyhow::Result<()> {
         let conn = self.db.write()?;
         conn.execute(
-            "INSERT INTO playlists (id, name, path, quality, kind, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO playlists (id, name, path, quality, kind, exclude_from_home, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 playlist.id.as_str(),
                 playlist.name.as_str(),
                 playlist.path.as_str(),
                 playlist.quality.as_str(),
                 playlist.kind.as_str(),
+                playlist.exclude_from_home,
                 playlist.created_at.to_rfc3339()
             ],
         )
         .inspect_err(|e| tracing::error!(playlist_id = %playlist.id, error = %e, "failed to insert playlist"))
         .context("failed to insert playlist")?;
+        Ok(())
+    }
+
+    fn update(&self, playlist: &Playlist) -> anyhow::Result<()> {
+        let conn = self.db.write()?;
+        conn.execute(
+            "UPDATE playlists SET name = ?2, path = ?3, quality = ?4, kind = ?5, exclude_from_home = ?6, created_at = ?7 WHERE id = ?1",
+            params![
+                playlist.id.as_str(),
+                playlist.name.as_str(),
+                playlist.path.as_str(),
+                playlist.quality.as_str(),
+                playlist.kind.as_str(),
+                playlist.exclude_from_home,
+                playlist.created_at.to_rfc3339()
+            ],
+        )
+        .inspect_err(|e| tracing::error!(playlist_id = %playlist.id, error = %e, "failed to update playlist"))
+        .context("failed to update playlist")?;
         Ok(())
     }
 
@@ -83,7 +105,7 @@ impl PlaylistRepository for SqlitePlaylistRepository {
         let conn = self.db.read()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, path, quality, kind, created_at FROM playlists ORDER BY name COLLATE NOCASE, rowid",
+                "SELECT id, name, path, quality, kind, exclude_from_home, created_at FROM playlists ORDER BY name COLLATE NOCASE, rowid",
             )
             .inspect_err(|e| tracing::error!(error = %e, "failed to prepare list query"))
             .context("failed to prepare list query")?;
@@ -95,17 +117,18 @@ impl PlaylistRepository for SqlitePlaylistRepository {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, bool>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             })
             .inspect_err(|e| tracing::error!(error = %e, "failed to list playlists"))
             .context("failed to list playlists")?;
 
         rows.map(|row| {
-            let (id, name, path, quality, kind, created_at) = row
+            let (id, name, path, quality, kind, exclude_from_home, created_at) = row
                 .inspect_err(|e| tracing::error!(error = %e, "failed to read playlist row"))
                 .context("failed to read playlist row")?;
-            Self::row_to_playlist(id, name, path, quality, kind, created_at)
+            Self::row_to_playlist(id, name, path, quality, kind, exclude_from_home, created_at)
         })
         .collect()
     }
@@ -119,6 +142,7 @@ impl SqlitePlaylistRepository {
         path: String,
         quality: String,
         kind: String,
+        exclude_from_home: bool,
         created_at: String,
     ) -> anyhow::Result<Playlist> {
         let id = PlaylistId::new(id)?;
@@ -129,7 +153,15 @@ impl SqlitePlaylistRepository {
         let created_at = DateTime::parse_from_rfc3339(&created_at)
             .context("failed to parse stored created_at")?
             .with_timezone(&Utc);
-        Ok(Playlist::create(id, name, path, quality, kind, created_at))
+        Ok(Playlist::create(
+            id,
+            name,
+            path,
+            quality,
+            kind,
+            exclude_from_home,
+            created_at,
+        ))
     }
 }
 
@@ -150,6 +182,7 @@ mod tests {
             PlaylistPath::new("my-playlist").unwrap(),
             Quality::High,
             PlaylistKind::YoutubeLinked,
+            false,
             DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
         )
     }
@@ -170,6 +203,31 @@ mod tests {
         repo.insert(&playlist).unwrap();
 
         assert_eq!(repo.find(&playlist.id).unwrap(), Some(playlist));
+    }
+
+    #[test]
+    fn it_should_return_the_exclude_from_home_of_an_inserted_playlist() {
+        let repo = repo();
+        let playlist = Playlist {
+            exclude_from_home: true,
+            ..playlist("PL1", "First")
+        };
+
+        repo.insert(&playlist).unwrap();
+
+        assert_eq!(repo.find(&playlist.id).unwrap(), Some(playlist));
+    }
+
+    #[test]
+    fn it_should_update_an_existing_playlist() {
+        let repo = repo();
+        let original = playlist("PL1", "First");
+        repo.insert(&original).unwrap();
+        let updated = original.with_exclude_from_home(true);
+
+        repo.update(&updated).unwrap();
+
+        assert_eq!(repo.find(&updated.id).unwrap(), Some(updated));
     }
 
     #[test]

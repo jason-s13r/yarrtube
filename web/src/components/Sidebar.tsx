@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { CheckCheck, Ellipsis, Plus, RotateCw, Trash2 } from 'lucide-react'
+import { Ellipsis, Plus, RotateCw } from 'lucide-react'
 import {
   queryKeys,
   useChannels,
   useLibraryAction,
   usePlaylists,
   useRemoveQuery,
+  useSetPlaylistExcludedFromHome,
 } from '@/api/queries'
 import {
   reconcileChannel,
@@ -26,14 +27,11 @@ import {
   orderChannels,
 } from '@/lib/sidebarSections'
 import { ConfirmDialog } from './ConfirmDialog'
+import { EntryActionsMenu } from './EntryActionsMenu'
 import { Thumbnail } from './Thumbnail'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
+import { errorMessage } from '@/lib/errorMessage'
 import { cn } from '@/lib/utils'
 
 function activeIdFrom(pathname: string, prefix: string): string | null {
@@ -116,27 +114,26 @@ interface SidebarRowMenuProps {
   item: LibraryItem
   onSync: () => Promise<void>
   onMarkWatched?: (() => Promise<void>) | undefined
+  onSetExcludedFromHome?: ((excluded: boolean) => Promise<void>) | undefined
   onDeleteRequest: () => void
 }
 
-function SidebarRowMenu({ item, onSync, onMarkWatched, onDeleteRequest }: SidebarRowMenuProps) {
+function SidebarRowMenu({
+  item,
+  onSync,
+  onMarkWatched,
+  onSetExcludedFromHome,
+  onDeleteRequest,
+}: SidebarRowMenuProps) {
   const [syncing, setSyncing] = useState(false)
 
   return (
-    // Non-modal so opening the delete confirmation from it doesn't leave the
-    // page with pointer events disabled.
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger
-        className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground data-[state=open]:bg-secondary data-[state=open]:text-foreground"
-        aria-label={`Actions for ${item.name}`}
-      >
-        {syncing ? (
-          <RotateCw className="size-3.5 animate-spin" />
-        ) : (
-          <Ellipsis className="size-4" />
-        )}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-auto min-w-44">
+    <EntryActionsMenu
+      name={item.name}
+      triggerIcon={
+        syncing ? <RotateCw className="size-3.5 animate-spin" /> : <Ellipsis className="size-4" />
+      }
+      leadingItems={
         <DropdownMenuItem
           disabled={syncing}
           onSelect={async () => {
@@ -151,18 +148,12 @@ function SidebarRowMenu({ item, onSync, onMarkWatched, onDeleteRequest }: Sideba
           <RotateCw />
           Sync
         </DropdownMenuItem>
-        {onMarkWatched && (
-          <DropdownMenuItem onSelect={onMarkWatched}>
-            <CheckCheck />
-            Mark all watched
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuItem variant="destructive" onSelect={onDeleteRequest}>
-          <Trash2 />
-          Delete
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+      }
+      onMarkWatched={onMarkWatched}
+      excludedFromHome={onSetExcludedFromHome && (item.exclude_from_home ?? false)}
+      onSetExcludedFromHome={onSetExcludedFromHome}
+      onDeleteRequest={onDeleteRequest}
+    />
   )
 }
 
@@ -172,6 +163,7 @@ interface SidebarRowProps {
   href: string
   onSync: () => Promise<void>
   onMarkWatched?: (() => Promise<void>) | undefined
+  onSetExcludedFromHome?: ((excluded: boolean) => Promise<void>) | undefined
   onDeleteRequest: () => void
   showAvatar?: boolean | undefined
   onNavigate: () => void
@@ -183,6 +175,7 @@ function SidebarRow({
   href,
   onSync,
   onMarkWatched,
+  onSetExcludedFromHome,
   onDeleteRequest,
   showAvatar,
   onNavigate,
@@ -219,6 +212,7 @@ function SidebarRow({
         item={item}
         onSync={onSync}
         onMarkWatched={onMarkWatched}
+        onSetExcludedFromHome={onSetExcludedFromHome}
         onDeleteRequest={onDeleteRequest}
       />
     </li>
@@ -240,6 +234,7 @@ interface SidebarSectionProps {
   hrefFor: (item: LibraryItem) => string
   onSync: (id: string) => Promise<void>
   onMarkWatched?: (id: string) => Promise<void>
+  onSetExcludedFromHome?: (id: string, excluded: boolean) => Promise<void>
   onDelete: (id: string) => Promise<void>
   deleteDescription: string
   showAvatar?: boolean
@@ -261,6 +256,7 @@ function SidebarSection({
   hrefFor,
   onSync,
   onMarkWatched,
+  onSetExcludedFromHome,
   onDelete,
   deleteDescription,
   showAvatar,
@@ -308,15 +304,10 @@ function SidebarSection({
                   window.alert(`Failed to sync "${item.name}": ${errorMessage(err)}`)
                 }
               }}
-              onMarkWatched={
-                onMarkWatched &&
-                (async () => {
-                  try {
-                    await onMarkWatched(item.id)
-                  } catch (err) {
-                    window.alert(`Failed to mark "${item.name}" watched: ${errorMessage(err)}`)
-                  }
-                })
+              onMarkWatched={onMarkWatched && (() => onMarkWatched(item.id))}
+              onSetExcludedFromHome={
+                onSetExcludedFromHome &&
+                ((excluded: boolean) => onSetExcludedFromHome(item.id, excluded))
               }
               onDeleteRequest={() => setPendingDelete(item)}
             />
@@ -353,10 +344,6 @@ function SidebarSection({
   )
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
 export const SIDEBAR_ID = 'app-sidebar'
 
 interface SidebarProps {
@@ -381,6 +368,7 @@ export function Sidebar({
   const { data: playlists, error: playlistsError } = usePlaylists()
   const refreshing = useLibraryAction()
   const removeQuery = useRemoveQuery()
+  const setPlaylistExcludedFromHome = useSetPlaylistExcludedFromHome()
   const [search, setSearch] = useState('')
   const [channelsExpanded, toggleChannelsExpanded] = useExpandedState('channels')
   const [playlistsExpanded, togglePlaylistsExpanded] = useExpandedState('playlists')
@@ -509,6 +497,7 @@ export function Sidebar({
             hrefFor={(playlist) => `/playlists/${playlist.id}`}
             onNavigate={onClose}
             onSync={refreshing(reconcilePlaylist)}
+            onSetExcludedFromHome={setPlaylistExcludedFromHome}
             onDelete={refreshing(async (id: string) => {
               await deletePlaylist(id)
               removeQuery(queryKeys.playlistVideos(id))

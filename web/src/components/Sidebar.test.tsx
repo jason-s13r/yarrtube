@@ -174,6 +174,97 @@ describe('Sidebar', () => {
     expect(screen.queryByRole('menuitem', { name: 'Mark all watched' })).not.toBeInTheDocument()
   })
 
+  it('excludes a playlist from home from its row menu', async () => {
+    let playlist = aPlaylist({ id: 'PL1', name: 'Bluey' })
+    const update = vi.fn(() => {
+      playlist = { ...playlist, exclude_from_home: true }
+      return playlist
+    })
+    const fetchMock = mockApi({
+      'GET /api/channels': [],
+      'GET /api/playlists': () => [playlist],
+      'PATCH /api/playlists/PL1': update,
+    })
+    renderWithProviders(
+      <Sidebar open onClose={() => {}} onAddChannel={() => {}} onAddPlaylist={() => {}} />,
+    )
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Actions for Bluey' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Exclude from home' }))
+
+    expect(update).toHaveBeenCalledOnce()
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'PATCH',
+    ) as [string, RequestInit]
+    expect(JSON.parse(patchCall[1].body as string)).toEqual({ exclude_from_home: true })
+    await user.click(await screen.findByRole('button', { name: 'Actions for Bluey' }))
+    expect(await screen.findByRole('menuitem', { name: 'Include in home' })).toBeInTheDocument()
+  })
+
+  it('includes an excluded playlist in home from its row menu', async () => {
+    let playlist = aPlaylist({ id: 'PL1', name: 'Bluey', exclude_from_home: true })
+    const update = vi.fn(() => {
+      playlist = { ...playlist, exclude_from_home: false }
+      return playlist
+    })
+    const fetchMock = mockApi({
+      'GET /api/channels': [],
+      'GET /api/playlists': () => [playlist],
+      'PATCH /api/playlists/PL1': update,
+    })
+    renderWithProviders(
+      <Sidebar open onClose={() => {}} onAddChannel={() => {}} onAddPlaylist={() => {}} />,
+    )
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Actions for Bluey' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Include in home' }))
+
+    expect(update).toHaveBeenCalledOnce()
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'PATCH',
+    ) as [string, RequestInit]
+    expect(JSON.parse(patchCall[1].body as string)).toEqual({ exclude_from_home: false })
+    await user.click(await screen.findByRole('button', { name: 'Actions for Bluey' }))
+    expect(await screen.findByRole('menuitem', { name: 'Exclude from home' })).toBeInTheDocument()
+  })
+
+  it('a channel row menu offers no home item', async () => {
+    renderSidebar({
+      'GET /api/channels': [aChannel({ name: 'Chan A' })],
+      'GET /api/playlists': [],
+    })
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Actions for Chan A' }))
+
+    expect(
+      (await screen.findAllByRole('menuitem')).map((item) => item.textContent),
+    ).toEqual(['Sync', 'Mark all watched', 'Delete'])
+  })
+
+  it("alerts when changing a playlist's home setting fails", async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    renderSidebar({
+      'GET /api/channels': [],
+      'GET /api/playlists': [aPlaylist({ id: 'PL1', name: 'Bluey' })],
+      'PATCH /api/playlists/PL1': { status: 500, error: 'database is locked' },
+    })
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Actions for Bluey' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Exclude from home' }))
+
+    await waitFor(() =>
+      expect(alert).toHaveBeenCalledWith(
+        'Failed to exclude "Bluey" from home: database is locked',
+      ),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Actions for Bluey' }))
+    expect(await screen.findByRole('menuitem', { name: 'Exclude from home' })).toBeInTheDocument()
+  })
+
   it('closes when Escape is pressed while open', async () => {
     mockApi({ 'GET /api/channels': [], 'GET /api/playlists': [] })
     const onClose = vi.fn()

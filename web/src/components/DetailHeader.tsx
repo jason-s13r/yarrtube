@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { CheckCheck, RotateCw, Trash2 } from 'lucide-react'
+import { RotateCw } from 'lucide-react'
 import type { Video } from '@/api/types'
 import { ConfirmDialog } from './ConfirmDialog'
+import { EntryActionsMenu } from './EntryActionsMenu'
 import { Thumbnail } from './Thumbnail'
 import { Button } from '@/components/ui/button'
+import { errorMessage } from '@/lib/errorMessage'
 
 function summaryFor(videos: Video[] | undefined, unwatchedCount: number | undefined): string | null {
   if (!videos) {
@@ -24,6 +26,9 @@ interface DetailHeaderProps {
   unwatchedCount?: number
   onSync: () => Promise<void>
   onMarkWatched?: () => Promise<void>
+  /** Playlists only: whether the playlist is excluded from home. */
+  excludedFromHome?: boolean
+  onSetExcludedFromHome?: (excluded: boolean) => Promise<void>
   onDelete: () => Promise<void>
   deleteDescription: string
 }
@@ -42,11 +47,12 @@ export function DetailHeader({
   unwatchedCount,
   onSync,
   onMarkWatched,
+  excludedFromHome,
+  onSetExcludedFromHome,
   onDelete,
   deleteDescription,
 }: DetailHeaderProps) {
   const [syncing, setSyncing] = useState(false)
-  const [markingWatched, setMarkingWatched] = useState(false)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const summary = summaryFor(videos, unwatchedCount)
 
@@ -84,36 +90,16 @@ export function DetailHeader({
           <RotateCw className={syncing ? 'animate-spin' : undefined} />
           <span className="hidden sm:inline">Sync</span>
         </Button>
-        {onMarkWatched && (
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={markingWatched}
-            aria-label="Mark all watched"
-            onClick={async () => {
-              setMarkingWatched(true)
-              try {
-                await onMarkWatched()
-              } catch (err) {
-                window.alert(`Failed to mark "${name}" watched: ${errorMessage(err)}`)
-              } finally {
-                setMarkingWatched(false)
-              }
-            }}
-          >
-            <CheckCheck />
-            <span className="hidden sm:inline">Mark all watched</span>
-          </Button>
-        )}
-        <Button
-          variant="outline"
-          size="sm"
-          className="text-destructive hover:text-destructive"
-          aria-label="Delete"
-          onClick={() => setConfirmingDelete(true)}
-        >
-          <Trash2 />
-        </Button>
+        {/* Labelled apart from the sidebar row's "Actions for <name>", which is
+            on screen at the same time. */}
+        <EntryActionsMenu
+          name={name}
+          label={`More actions for ${name}`}
+          onMarkWatched={onMarkWatched}
+          excludedFromHome={excludedFromHome}
+          onSetExcludedFromHome={onSetExcludedFromHome}
+          onDeleteRequest={() => setConfirmingDelete(true)}
+        />
       </div>
 
       <ConfirmDialog
@@ -125,8 +111,4 @@ export function DetailHeader({
       />
     </div>
   )
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }

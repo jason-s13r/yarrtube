@@ -1,11 +1,13 @@
-import { EllipsisVertical, Check } from 'lucide-react'
+import { EllipsisVertical, Check, EyeOff } from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { useMarkVideoWatched } from '@/api/queries'
+import { useMarkVideoWatched, useSetPlaylistExcludedFromHome } from '@/api/queries'
+import { errorMessage } from '@/lib/errorMessage'
+import { homeSettingAction } from '@/lib/homeSetting'
 import { cn } from '@/lib/utils'
 
 interface VideoActionsMenuProps {
@@ -14,12 +16,21 @@ interface VideoActionsMenuProps {
   title: string
   /** When false, "Mark as watched" is disabled. */
   markable: boolean
+  /** The playlist the card is sourced from, offered for exclusion from home. */
+  excludablePlaylist?: { id: string; name: string }
   className?: string
 }
 
 /** A vertical "⋮" menu of actions on one video. */
-export function VideoActionsMenu({ videoId, title, markable, className }: VideoActionsMenuProps) {
+export function VideoActionsMenu({
+  videoId,
+  title,
+  markable,
+  excludablePlaylist,
+  className,
+}: VideoActionsMenuProps) {
   const markVideoWatched = useMarkVideoWatched()
+  const setPlaylistExcludedFromHome = useSetPlaylistExcludedFromHome()
 
   return (
     <DropdownMenu modal={false}>
@@ -46,11 +57,23 @@ export function VideoActionsMenu({ videoId, title, markable, className }: VideoA
           <Check />
           Mark as watched
         </DropdownMenuItem>
+        {excludablePlaylist && (
+          <DropdownMenuItem
+            onSelect={async () => {
+              try {
+                await setPlaylistExcludedFromHome(excludablePlaylist.id, true)
+              } catch (err) {
+                window.alert(
+                  `Failed to ${homeSettingAction(true, excludablePlaylist.name)}: ${errorMessage(err)}`,
+                )
+              }
+            }}
+          >
+            <EyeOff />
+            Exclude "{excludablePlaylist.name}" from home
+          </DropdownMenuItem>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   )
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }

@@ -25,11 +25,23 @@ In order to let yarrtube create and manage collections in Plex, you need:
 ## 1. Setup Plex library
 
 Next to every video, yarrtube writes a `movie.nfo` with meta information Plex can read.
-To tell Plex to read them, you need a **Movies** library with the Plex NFO Agent. You can also disable cinema trailers, credits detection and other stuff, and make sure **Use local assets** is enabled.
+To tell Plex to read them, you need a **Movies** library whose _Advanced_ settings use the **Plex Movie** scanner and the **Plex NFO Movie** agent. You can also disable cinema trailers, credits detection and other stuff, and make sure **Use local assets** is enabled.
 
 <p align="center">
   <img src="plex_setup/plex_library1.png" alt="Plex Library Setup" width="450"/>
 </p>
+
+The Plex NFO Movie agent needs Plex Media Server 1.43.1 or newer. If it's
+missing from the agent list:
+
+- Check the server version under _Settings → General_ and update if it's
+  older than 1.43.1.
+- Pick **Plex Movie** as the scanner, not the legacy **Plex Movie Scanner**.
+- After upgrading from a version without the NFO agent, restart Plex Media
+  Server once more by hand.
+- If it still isn't listed, open the server's own web app at
+  `http://<YOUR_PLEX_IP>:32400/web` and create the library there. The
+  hosted app at app.plex.tv may not list it yet, even after an upgrade.
 
 ## 2. Get your Plex token (`YARRTUBE_PLEX_TOKEN`)
 
@@ -39,6 +51,18 @@ Follow Plex's official guide:
 Short version: in the Plex web app, open any library item → `⋯` →
 _Get Info_ → _View XML_, and copy the `X-Plex-Token=...` value from the
 opened page's URL.
+
+If you can't find _View XML_, or you have a shell on the Plex server, you
+can read the token from its `Preferences.xml` instead. On a Linux package
+install:
+
+```bash
+sudo grep -o 'PlexOnlineToken="[^"]*"' \
+  "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml"
+```
+
+The value between the quotes is the token. Treat it like a password: it
+gives full access to your Plex account and server.
 
 ## 3. Find the library section ID(s)
 
@@ -83,6 +107,14 @@ environment:
   - YARRTUBE_PLEX_VIDEOS_PATH=<HOST_PATH_MOUNTED_AT_/videos>
 ```
 
+`YARRTUBE_PLEX_URL` must be reachable from inside the yarrtube container.
+`localhost` there is the container itself, not the machine running Docker,
+so `http://localhost:32400` only works if the container uses host
+networking. If Plex runs on the same machine, either use the machine's LAN
+IP (e.g. `http://192.168.1.10:32400`) or run yarrtube with
+`network_mode: host`. With host networking, `ports:` is ignored, so set
+`YARRTUBE_PORT` to choose the port the web UI listens on.
+
 `YARRTUBE_PLEX_VIDEOS_PATH` is optional. With it, yarrtube asks Plex to
 scan each video's folder as soon as the download finishes, in the
 configured sections whose library folders contain it. Without it, new
@@ -121,3 +153,9 @@ yarrtube behaves exactly as before and never contacts Plex.
   enabled?) and for `Plex collections reconcile pass failed` errors (wrong
   URL/token/section id?). Test your values by hand:
   `curl "http://<PLEX>:32400/library/sections/<ID>/all?X-Plex-Token=<TOKEN>"`.
+- **`error sending request for url (http://.../library/sections)`** in the
+  log: yarrtube can't open a connection to Plex at all. A wrong token gives
+  a 401 instead. Unless yarrtube uses host networking, check that
+  `YARRTUBE_PLEX_URL` isn't `localhost` (see
+  [Configure yarrtube](#4-configure-yarrtube)) and that no firewall on the
+  Plex machine blocks port 32400 from Docker's network.

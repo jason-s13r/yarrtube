@@ -221,8 +221,12 @@ Things to know:
   video as a new item, so its Plex watch history starts over; yarrtube's own
   watched state is kept. Run a library scan in Plex once the first sync has
   finished. A video whose publish date yarrtube can't get from YouTube stays
-  where it is until a later sync can. Switching back to `movie` doesn't move
-  files.
+  where it is until a later sync can.
+- **Switching back works too.** With `YARRTUBE_LIBRARY_LAYOUT=movie` again,
+  each sync moves TV-layout videos back into their own `<Title>/` folder
+  with a `movie.nfo`, removes their episode files and any season folder
+  left empty, and Plex again sees them as new items. `tvshow.nfo` and the
+  poster stay at each show's root; a Movies library ignores them.
 - In this layout yarrtube needs a video's YouTube metadata to name its file,
   so a video whose metadata can't be fetched is retried later instead of
   being downloaded under a name Plex can't place.

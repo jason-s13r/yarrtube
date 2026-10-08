@@ -1,14 +1,17 @@
 use crate::domain::playlist::PlaylistPath;
 use crate::domain::services::{
     MetadataGenerator, MetadataGeneratorApi, ThumbnailFetcher, ThumbnailFetcherApi,
+    delete_video_entry,
 };
 use crate::domain::shared::{LibraryLayout, Quality};
 use crate::domain::task::{ScheduledTask, Task};
 use crate::domain::video::VideoRecordId;
-use crate::domain::video::video_filename::{collision_suffixed_folder, episode_folder_name};
+use crate::domain::video::video_filename::{
+    VideoFilename, collision_suffixed_folder, episode_folder_name,
+};
 use crate::domain::video::{
     Video, VideoStatus, entry_owns, is_named_after, is_season_dir, resolve_output_dir,
-    strip_episode_prefix, video_dir_for_filename, video_entry,
+    strip_episode_prefix, top_level_entry, video_dir_for_filename, video_entry,
 };
 use crate::domain::video_metadata::{EpisodeNumber, NfoFile, TVSHOW_NFO_FILENAME, VideoMetadata};
 use crate::infrastructure::repositories::filesystem_video_file_repository::VideoFileRepository;
@@ -127,7 +130,7 @@ impl InternalVideoReconcilerApi for InternalVideoReconciler {
             .schedule_missing(&actual.videos, &handled, &actual.output_dir)?;
 
         self.delete_orphaned_files(&actual)?;
-        self.migrate_to_tv_layout(desired, &actual);
+        self.migrate_layout(desired, &actual);
         Ok(())
     }
 }
@@ -345,13 +348,18 @@ impl InternalVideoReconciler {
             })
     }
 
-    /// In the tv layout, moves every downloaded video whose files aren't
-    /// directly in a season folder yet into it. Runs last in a pass, after
-    /// orphan cleanup, which protects files by their recorded paths.
-    fn migrate_to_tv_layout(&self, desired: &DesiredState, actual: &ActualState) {
-        if self.layout != LibraryLayout::Tv {
-            return;
+    /// Moves downloaded videos into the active layout. Runs last in a pass,
+    /// after orphan cleanup, which protects files by their recorded paths.
+    fn migrate_layout(&self, desired: &DesiredState, actual: &ActualState) {
+        match self.layout {
+            LibraryLayout::Tv => self.migrate_to_tv_layout(desired, actual),
+            LibraryLayout::Movie => self.migrate_to_movie_layout(desired, actual),
         }
+    }
+
+    /// In the tv layout, moves every downloaded video whose files aren't
+    /// directly in a season folder yet into it.
+    fn migrate_to_tv_layout(&self, desired: &DesiredState, actual: &ActualState) {
         actual
             .videos
             .iter()
@@ -361,6 +369,128 @@ impl InternalVideoReconciler {
                     warn!(video_id = %video.id, error = %e, "failed to move the video into the tv layout, retrying next pass");
                 }
             });
+    }
+
+    /// In the movie layout, moves every downloaded video whose files are in
+    /// a season folder back into its own title-named folder.
+    fn migrate_to_movie_layout(&self, desired: &DesiredState, actual: &ActualState) {
+        let migrating: Vec<&Video> = actual
+            .videos
+            .iter()
+            .filter(|video| video.needs_movie_layout_migration())
+            .collect();
+        migrating.iter().for_each(|video| {
+            if let Err(e) = self.migrate_video_to_movie(desired, actual, video) {
+                warn!(video_id = %video.id, error = %e, "failed to move the video back into the movie layout, retrying next pass");
+            }
+        });
+        let seasons: HashSet<&str> = migrating
+            .iter()
+            .filter_map(|video| video.filename.as_deref().map(top_level_entry))
+            .collect();
+        seasons
+            .into_iter()
+            .for_each(|season| self.remove_empty_season(&actual.output_dir, season));
+    }
+
+    /// Best-effort: an empty season folder left behind is harmless.
+    fn remove_empty_season(&self, output_dir: &Path, season: &str) {
+        let emptied = self
+            .video_file_repository
+            .list(&output_dir.join(season))
+            .is_ok_and(|files| files.is_empty());
+        if !emptied {
+            return;
+        }
+        if let Err(e) = self.video_file_repository.delete(output_dir, season) {
+            warn!(season, error = %e, "failed to remove a season folder left empty");
+        }
+    }
+
+    /// Moves one downloaded video's media file and thumbnail into its own
+    /// title-named folder, named after it as a movie-layout download is,
+    /// records the new paths and its `movie.nfo` (when its metadata is
+    /// known), then deletes its episode files.
+    fn migrate_video_to_movie(
+        &self,
+        desired: &DesiredState,
+        actual: &ActualState,
+        video: &Video,
+    ) -> anyhow::Result<()> {
+        let folder = self.claim_movie_folder(&actual.output_dir, video)?;
+        let old_filename = video.filename.as_deref().unwrap_or_default();
+        let filename = moved_path(&folder, &folder, old_filename);
+        self.video_file_repository
+            .rename(&actual.output_dir, old_filename, &filename)?;
+        let thumbnail = self.move_thumbnail(&actual.output_dir, video, &folder, &folder);
+        let every_file_moved = video.thumbnail_filename.is_none() || thumbnail.is_some();
+        self.video_repository.update(&video.clone().relocate(
+            filename,
+            thumbnail.clone(),
+            self.clock.now(),
+        ))?;
+        let sort_position = desired.sort_positions.get(&video.id).copied();
+        self.save_movie_metadata(
+            video,
+            sort_position,
+            thumbnail.as_deref(),
+            &actual.output_dir.join(&folder),
+        );
+        if every_file_moved {
+            self.remove_old_entry(&actual.output_dir, old_filename);
+        }
+        info!(video_id = %video.id, folder = %folder, "moved the video back into the movie layout");
+        Ok(())
+    }
+
+    /// The video's title-named folder, or its collision-suffixed form when
+    /// an entry of that name already exists in the output dir.
+    fn claim_movie_folder(&self, output_dir: &Path, video: &Video) -> anyhow::Result<String> {
+        let folder = VideoFilename::from_title(&video.title);
+        let taken = self
+            .video_file_repository
+            .list(output_dir)?
+            .iter()
+            .any(|entry| entry == folder.as_str());
+        Ok(if taken {
+            collision_suffixed_folder(folder.as_str(), video.youtube_id.as_str())
+        } else {
+            folder.as_str().to_string()
+        })
+    }
+
+    /// Best-effort, and skipped when the metadata is unknown: metadata
+    /// repair writes the `movie.nfo` on a later pass.
+    fn save_movie_metadata(
+        &self,
+        video: &Video,
+        sort_position: Option<i64>,
+        thumbnail: Option<&str>,
+        video_dir: &Path,
+    ) {
+        let metadata = match self.migration_metadata(video, sort_position) {
+            Ok(Some(metadata)) => metadata.with_thumb(thumb_basename(thumbnail)),
+            Ok(None) => return,
+            Err(e) => {
+                warn!(video_id = %video.id, error = %e, "failed to look up the migrated video's metadata");
+                return;
+            }
+        };
+        let nfo = NfoFile::movie(&metadata);
+        if let Err(e) = self
+            .video_metadata_repository
+            .save(&video.id, &metadata, &nfo, video_dir)
+        {
+            warn!(video_id = %video.id, error = %e, "failed to save the migrated video's metadata");
+        }
+    }
+
+    /// Best-effort: unrecorded leftovers are orphans the next pass deletes.
+    fn remove_old_entry(&self, output_dir: &Path, old_filename: &str) {
+        let entry = video_entry(old_filename);
+        if let Err(e) = delete_video_entry(self.video_file_repository.as_ref(), output_dir, entry) {
+            warn!(entry, error = %e, "failed to remove the episode files a migrated video left");
+        }
     }
 
     /// Moves one downloaded video's media file and thumbnail into its
@@ -477,11 +607,7 @@ impl InternalVideoReconciler {
         thumbnail: Option<&str>,
         season_dir: &Path,
     ) {
-        let thumb = thumbnail
-            .and_then(|t| Path::new(t).file_name())
-            .and_then(|t| t.to_str())
-            .map(str::to_string);
-        let metadata = metadata.with_thumb(thumb);
+        let metadata = metadata.with_thumb(thumb_basename(thumbnail));
         let nfo = NfoFile::episode(&metadata, episode, basename);
         if let Err(e) = self
             .video_metadata_repository
@@ -591,13 +717,21 @@ impl ActualState {
     }
 }
 
-/// `old` (a media file or thumbnail) moved into `season` under `basename`,
+/// `old` (a media file or thumbnail) moved into `folder` under `basename`,
 /// keeping its extension.
-fn moved_path(season: &str, basename: &str, old: &str) -> String {
+fn moved_path(folder: &str, basename: &str, old: &str) -> String {
     match Path::new(old).extension().and_then(|e| e.to_str()) {
-        Some(extension) => format!("{season}/{basename}.{extension}"),
-        None => format!("{season}/{basename}"),
+        Some(extension) => format!("{folder}/{basename}.{extension}"),
+        None => format!("{folder}/{basename}"),
     }
+}
+
+/// A recorded thumbnail path's file name, as an NFO's `thumb` references it.
+fn thumb_basename(thumbnail: Option<&str>) -> Option<String> {
+    thumbnail
+        .and_then(|t| Path::new(t).file_name())
+        .and_then(|t| t.to_str())
+        .map(str::to_string)
 }
 
 /// A TV-layout show's own top-level entries, never orphans: `tvshow.nfo`,

@@ -288,6 +288,17 @@ impl Video {
                 .is_some_and(|filename| !in_season_dir(filename))
     }
 
+    /// Downloaded, and its recorded file is inside a TV-layout season
+    /// folder, so the movie layout migration moves it back.
+    pub fn needs_movie_layout_migration(&self) -> bool {
+        self.status == VideoStatus::Downloaded
+            && self
+                .filename
+                .as_deref()
+                .and_then(|filename| filename.split_once('/'))
+                .is_some_and(|(first, _)| is_season_dir(first))
+    }
+
     /// The video's files moved: records their new paths, nothing else
     /// changes.
     pub fn relocate(

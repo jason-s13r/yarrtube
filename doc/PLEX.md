@@ -159,3 +159,65 @@ yarrtube behaves exactly as before and never contacts Plex.
   `YARRTUBE_PLEX_URL` isn't `localhost` (see
   [Configure yarrtube](#4-configure-yarrtube)) and that no firewall on the
   Plex machine blocks port 32400 from Docker's network.
+
+## TV Shows library layout
+
+A Movies library shows each video with a portrait 2:3 poster, so YouTube's
+16:9 thumbnails get cropped. Set `YARRTUBE_LIBRARY_LAYOUT=tv` to load
+yarrtube's videos into a Plex **TV Shows** library instead, where episodes
+use 16:9 thumbnails. Each tracked channel and playlist becomes a show:
+
+```
+<channel>/
+  tvshow.nfo                    show title and YouTube channel ID
+  poster.jpg                    the channel's avatar
+  Season 2026/                  one season per publish year
+    S2026E01021530 - My Video.mp4
+    S2026E01021530 - My Video.nfo
+    S2026E01021530 - My Video.jpg
+<playlist>/
+  tvshow.nfo                    no poster: playlists have no stored image
+  Season 01/
+    S01E03 - Intro.{mp4,nfo,jpg}
+```
+
+Episode files sit directly in their season folder, with no folder per
+episode: Plex's NFO Series agent only looks for `tvshow.nfo` one folder
+above an episode's file, so an extra folder would leave the show without
+its name and poster.
+
+- **Channel episodes** are numbered from the YouTube publish time (UTC):
+  season = year, episode = `MMDDhhmm`. `S2026E01021530` was published on
+  2 January 2026 at 15:30.
+- **Playlist episodes** are in season 1, numbered by their position in the
+  playlist when the video is first saved.
+
+To set it up:
+
+1. Set `YARRTUBE_LIBRARY_LAYOUT=tv` and restart yarrtube.
+2. In Plex, create a **TV Shows** library and add yarrtube's `channels` and
+   `playlists` folders to it (e.g. `/data/Youtube/channels` and
+   `/data/Youtube/playlists`), not the videos root: Plex treats each folder
+   directly under a library folder as a show. Under _Advanced_, pick the
+   **Plex TV Series** scanner and the **Plex NFO Series** agent, and enable
+   **Use local assets**.
+3. Under the library's _Advanced_ settings, set **Seasons** to **Hide**, so
+   each channel reads as one stream of videos rather than a list of years.
+
+Things to know:
+
+- **Collections are not supported** in this layout: the Plex collections
+  sync is skipped, and the startup log says so. With
+  `YARRTUBE_PLEX_VIDEOS_PATH` set, yarrtube still asks Plex to scan after
+  each download, scanning the video's whole show folder so a new show is
+  matched from its `tvshow.nfo` straight away.
+- **Show files for every source:** each sync pass writes `tvshow.nfo` and
+  the poster for every tracked channel and playlist, including ones you
+  tracked before switching to `tv`.
+- **Existing files are not migrated.** Switching the layout only affects new
+  downloads; videos already downloaded keep their folders and `movie.nfo`.
+  Start from an empty videos folder (or re-add your channels and playlists)
+  to have everything in the TV layout.
+- In this layout yarrtube needs a video's YouTube metadata to name its file,
+  so a video whose metadata can't be fetched is retried later instead of
+  being downloaded under a name Plex can't place.

@@ -5,6 +5,7 @@ use crate::domain::playlist_video::PlaylistVideo;
 use crate::domain::playlist_video::{VideoAddedToPlaylist, VideoRemovedFromPlaylist};
 use crate::domain::services::{
     DesiredState, InternalVideoReconciler, InternalVideoReconcilerApi, MembershipDelta,
+    ShowMetadataWriter, ShowMetadataWriterApi,
 };
 use crate::domain::task::Task;
 use crate::domain::video::{Video, VideoId, VideoRecordId, VideoStatus};
@@ -37,6 +38,7 @@ pub struct PlaylistVideoReconciler {
     internal_video_reconciler: Arc<InternalVideoReconciler>,
     clock: Arc<dyn Clock>,
     reconcile_interval_seconds: i64,
+    show_metadata_writer: Arc<ShowMetadataWriter>,
 }
 
 impl PlaylistVideoReconciler {
@@ -51,6 +53,7 @@ impl PlaylistVideoReconciler {
         internal_video_reconciler: Arc<InternalVideoReconciler>,
         clock: Arc<dyn Clock>,
         reconcile_interval_seconds: i64,
+        show_metadata_writer: Arc<ShowMetadataWriter>,
     ) -> Self {
         Self {
             playlist_repository,
@@ -62,6 +65,7 @@ impl PlaylistVideoReconciler {
             internal_video_reconciler,
             clock,
             reconcile_interval_seconds,
+            show_metadata_writer,
         }
     }
 }
@@ -141,6 +145,7 @@ impl PlaylistVideoReconciler {
         info!(playlist_id = %playlist.id, kind = %playlist.kind, "reconciling playlist");
 
         let delta = self.sync_membership_with_youtube(playlist, on_listing_failure)?;
+        self.show_metadata_writer.write_for_playlist(playlist);
         let desired = self.desired_state(playlist)?;
         self.internal_video_reconciler.reconcile(&desired, &delta)
     }

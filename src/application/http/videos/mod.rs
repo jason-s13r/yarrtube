@@ -116,6 +116,7 @@ mod tests {
     use crate::domain::playlist_video::PlaylistVideo;
     use crate::domain::shared::Quality;
     use crate::domain::video::Video;
+    use crate::domain::video_metadata::NfoFile;
     use crate::domain::video_metadata::VideoMetadata;
     use crate::infrastructure::repositories::sqlite_channel_repository::{
         ChannelRepository, SqliteChannelRepository,
@@ -283,7 +284,12 @@ mod tests {
             &video,
         );
         video_metadata_repository
-            .save(&video.id, &video_metadata(), video_dir.path())
+            .save(
+                &video.id,
+                &video_metadata(),
+                &NfoFile::movie(&video_metadata()),
+                video_dir.path(),
+            )
             .unwrap();
         let video_searcher = VideoSearcher::new(
             playlist_repository,
@@ -627,7 +633,12 @@ mod tests {
             0,
         );
         video_metadata_repository
-            .save(&video.id, &video_metadata(), video_dir.path())
+            .save(
+                &video.id,
+                &video_metadata(),
+                &NfoFile::movie(&video_metadata()),
+                video_dir.path(),
+            )
             .unwrap();
         let video_searcher = VideoSearcher::new(
             Arc::new(SqlitePlaylistRepository::new(db.database())),

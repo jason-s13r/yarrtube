@@ -75,6 +75,7 @@ Environment variables read by Yarrtube are listed below. Every variable except `
 | `YARRTUBE_RECONCILE_INTERVAL_SECONDS`      | `3600`                | How often each tracked playlist or channel is reconciled                                                                                                                                                                     |
 | `YARRTUBE_DB_PATH`                         | `/config/yarrtube.db` | Path to the SQLite database (inside the container)                                                                                                                                                                           |
 | `YARRTUBE_VIDEOS_PATH`                     | `/videos`             | Root directory downloaded videos are saved under (inside the container)                                                                                                                                                      |
+| `YARRTUBE_LIBRARY_LAYOUT`                  | `movie`               | How downloaded videos are laid out for a media server: `movie` (one folder with a `movie.nfo` per video) or `tv` (each channel or playlist is a TV show and its videos are episodes in season folders, see [PLEX.md](PLEX.md#tv-shows-library-layout)). Any other value stops the daemon at startup |
 | `YARRTUBE_DOWNLOAD_CONCURRENCY`            | `2`                   | How many videos download at the same time. Higher values download faster but make YouTube more likely to throttle or bot-check you                                                                                           |
 | `YARRTUBE_RETRY_BASE_DELAY_SECONDS`        | `150`                 | Delay before retrying a failed task; it grows exponentially with each further retry                                                                                                                                          |
 | `YARRTUBE_AVATARS_PATH`                    | `/config/avatars`     | Directory channel avatars are stored in (inside the container)                                                                                                                                                               |
@@ -96,6 +97,10 @@ episodes. The integration is off by default: it activates only when
 `YARRTUBE_PLEX_URL`, `YARRTUBE_PLEX_TOKEN` and at least one of
 `YARRTUBE_PLEX_PLAYLIST_SECTION_ID` / `YARRTUBE_PLEX_CHANNEL_SECTION_ID`
 are set. Each Plex library holds a single kind — playlists or channels.
+Collections are only supported in the default `movie` library layout: with
+`YARRTUBE_LIBRARY_LAYOUT=tv` they are skipped (a startup log line says so),
+while scanning downloaded folders via `YARRTUBE_PLEX_VIDEOS_PATH` keeps
+working.
 
 The Plex-side setup (library configuration, obtaining the token and
 section IDs, recommended library settings) is covered step by step in

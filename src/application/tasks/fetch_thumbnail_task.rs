@@ -45,10 +45,16 @@ impl TaskHandler for FetchThumbnailTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::services::MetadataGenerator;
+    use crate::domain::shared::LibraryLayout;
     use crate::domain::shared::Quality;
     use crate::domain::video::{Video, VideoId};
+    use crate::infrastructure::repositories::sqlite_playlist_video_repository::SqlitePlaylistVideoRepository;
     use crate::infrastructure::repositories::sqlite_task_repository::SqliteTaskRepository;
     use crate::infrastructure::repositories::sqlite_video_repository::SqliteVideoRepository;
+    use crate::infrastructure::repositories::youtube_metadata_repository::{
+        FakeYoutubeMetadataRepository, YoutubeMetadata,
+    };
     use crate::infrastructure::repositories::youtube_video_downloader_repository::{
         FakeVideoDownloaderRepository, FetchedThumbnail,
     };
@@ -81,6 +87,12 @@ mod tests {
                     Arc::new(FixedClock(later())),
                 )),
                 Arc::new(FixedClock(later())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
         );
 
@@ -114,6 +126,12 @@ mod tests {
                     Arc::new(FixedClock(later())),
                 )),
                 Arc::new(FixedClock(later())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
         );
 
@@ -151,6 +169,12 @@ mod tests {
                     Arc::new(FixedClock(later())),
                 )),
                 Arc::new(FixedClock(later())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
         );
 
@@ -188,6 +212,12 @@ mod tests {
                     Arc::new(FixedClock(later())),
                 )),
                 Arc::new(FixedClock(later())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
         );
 
@@ -216,6 +246,12 @@ mod tests {
                     Arc::new(FixedClock(later())),
                 )),
                 Arc::new(FixedClock(later())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
         );
 
@@ -247,6 +283,12 @@ mod tests {
                     Arc::new(FixedClock(later())),
                 )),
                 Arc::new(FixedClock(later())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
         );
 
@@ -292,6 +334,12 @@ mod tests {
                     Arc::new(FixedClock(later())),
                 )),
                 Arc::new(FixedClock(later())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
         );
 
@@ -312,6 +360,130 @@ mod tests {
                 Some("My Video".to_string()),
             )]
         );
+    }
+
+    #[test]
+    fn it_should_fetch_a_thumbnail_into_its_season_folder_in_tv_layout() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let video_downloader_repository = Arc::new(FakeVideoDownloaderRepository::echoing());
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let task = FetchThumbnailTask::new(
+            video_repository.clone(),
+            Arc::new(ThumbnailFetcher::new(
+                video_repository.clone(),
+                video_downloader_repository.clone(),
+                Arc::new(SqliteTaskRepository::new(
+                    db.database(),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(FixedClock(later())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository {
+                        metadata: Some(tv_youtube_metadata()),
+                    }),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Tv,
+            )),
+        );
+
+        let result = run(&task, &payload_for(video.id.as_str()));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *video_downloader_repository
+                .prepare_folder_calls
+                .lock()
+                .unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            *video_downloader_repository
+                .prepare_episode_calls
+                .lock()
+                .unwrap(),
+            vec![(
+                PathBuf::from("/videos/my-playlist/Season 2026"),
+                "S2026E01021530 - My Video".to_string(),
+                "yt1".to_string(),
+            )]
+        );
+        assert_eq!(
+            *video_downloader_repository.thumbnail_calls.lock().unwrap(),
+            vec![(
+                "https://www.youtube.com/watch?v=yt1".to_string(),
+                "S2026E01021530 - My Video".to_string(),
+                "yt1".to_string(),
+                PathBuf::from("/videos/my-playlist"),
+                Some("Season 2026".to_string()),
+            )]
+        );
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![video.with_thumbnail("Season 2026/S2026E01021530 - My Video.jpg", later())]
+        );
+    }
+
+    #[test]
+    fn it_should_skip_the_thumbnail_fetch_without_metadata_in_tv_layout() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let video_downloader_repository = Arc::new(FakeVideoDownloaderRepository::echoing());
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let task = FetchThumbnailTask::new(
+            video_repository.clone(),
+            Arc::new(ThumbnailFetcher::new(
+                video_repository.clone(),
+                video_downloader_repository.clone(),
+                Arc::new(SqliteTaskRepository::new(
+                    db.database(),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(FixedClock(later())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(later())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Tv,
+            )),
+        );
+
+        let result = run(&task, &payload_for(video.id.as_str()));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *video_downloader_repository
+                .prepare_folder_calls
+                .lock()
+                .unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            *video_downloader_repository.thumbnail_calls.lock().unwrap(),
+            vec![]
+        );
+        assert_eq!(video_repository.list().unwrap(), vec![video]);
+    }
+
+    /// YouTube metadata for `my_video()` published at
+    /// `2026-01-02T15:30:45Z`, so a channel video is numbered
+    /// `S2026E01021530`.
+    fn tv_youtube_metadata() -> YoutubeMetadata {
+        YoutubeMetadata {
+            title: "My Video".to_string(),
+            description: "A description".to_string(),
+            channel_title: "My Channel".to_string(),
+            published_at: DateTime::parse_from_rfc3339("2026-01-02T15:30:45Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            tags: Vec::new(),
+            category_id: None,
+        }
     }
 
     fn my_video() -> Video {

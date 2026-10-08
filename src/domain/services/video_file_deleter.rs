@@ -1,6 +1,6 @@
 use crate::domain::channel::ChannelHandle;
 use crate::domain::playlist::PlaylistId;
-use crate::domain::video::{resolve_output_dir, top_level_entry};
+use crate::domain::video::{entry_owns, is_season_dir, resolve_output_dir, video_entry};
 use crate::infrastructure::repositories::filesystem_video_file_repository::VideoFileRepository;
 use std::path::Path;
 use std::sync::Arc;
@@ -32,9 +32,10 @@ pub trait VideoFileDeleterApi: Send + Sync {
     /// `subscribers::delete_video_file_on_video_removed_from_playlist`/
     /// `..._channel` whenever a downloaded video is removed from its
     /// container. `output_dir` is the container's already-resolved output
-    /// directory. Each recorded path is reduced to its `top_level_entry()`
+    /// directory. Each recorded path is reduced to its `video_entry()`
     /// before deleting, so a new-style video's whole folder (owning its file,
-    /// thumbnail, and `movie.nfo` together) is removed as one unit, while a
+    /// thumbnail, and NFO together; in the TV layout the episode files
+    /// sharing its base name, never the season folder) is removed as one unit, while a
     /// legacy flat video's file and thumbnail are still deleted individually
     /// exactly as before. No-ops (without erroring) for either entry it has
     /// no recorded filename for, or no matching entry is found, so the task
@@ -114,8 +115,8 @@ impl VideoFileDeleter {
             debug!("video has no recorded filename, skipping file deletion");
             return Ok(());
         };
-        let entry = top_level_entry(&filename);
-        if self.video_file_repository.delete(output_dir, entry)? {
+        let entry = video_entry(&filename);
+        if delete_video_entry(self.video_file_repository.as_ref(), output_dir, entry)? {
             info!(filename, entry, "deleted video file");
         } else {
             debug!(filename, entry, "no matching video file found to delete");
@@ -132,8 +133,8 @@ impl VideoFileDeleter {
             debug!("video has no recorded thumbnail filename, skipping file deletion");
             return Ok(());
         };
-        let entry = top_level_entry(&thumbnail_filename);
-        if self.video_file_repository.delete(output_dir, entry)? {
+        let entry = video_entry(&thumbnail_filename);
+        if delete_video_entry(self.video_file_repository.as_ref(), output_dir, entry)? {
             info!(thumbnail_filename, entry, "deleted video thumbnail file");
         } else {
             debug!(
@@ -142,6 +143,29 @@ impl VideoFileDeleter {
             );
         }
         Ok(())
+    }
+}
+
+/// Deletes a video's `entry` (see `video_entry`) in `output_dir`: for a
+/// TV-layout season entry (`"Season N/<base>"`) every file it owns in the
+/// season folder, never the season folder itself; any other entry (a
+/// per-video folder or a legacy flat file) as one unit. Returns whether
+/// anything was deleted.
+pub fn delete_video_entry(
+    video_file_repository: &dyn VideoFileRepository,
+    output_dir: &Path,
+    entry: &str,
+) -> anyhow::Result<bool> {
+    match entry.split_once('/') {
+        Some((season, _)) if is_season_dir(season) => video_file_repository
+            .list(&output_dir.join(season))?
+            .into_iter()
+            .map(|file| format!("{season}/{file}"))
+            .filter(|file| entry_owns(entry, file))
+            .try_fold(false, |deleted, file| {
+                Ok(video_file_repository.delete(output_dir, &file)? || deleted)
+            }),
+        _ => video_file_repository.delete(output_dir, entry),
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::domain::plex::plex_folder_path;
+use crate::domain::video::is_season_dir;
 use crate::infrastructure::repositories::plex_collection_repository::PlexCollectionRepository;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,6 +39,12 @@ pub trait PlexFolderScannerApi: Send + Sync {
     /// root, or contained by no configured section, is logged and skipped.
     /// Fails when Plex can't be reached, so the caller can retry.
     fn scan_folder(&self, folder: &Path) -> anyhow::Result<()>;
+
+    /// Scans a downloaded video's `folder` (relative to its show's
+    /// `output_dir`) like `scan_folder`. A TV-layout episode folder
+    /// (`Season N/<episode>`) scans its whole show folder instead, so Plex
+    /// also matches the show from its `tvshow.nfo` and poster.
+    fn scan_downloaded_video(&self, output_dir: &Path, folder: &str) -> anyhow::Result<()>;
 }
 
 impl PlexFolderScannerApi for PlexFolderScanner {
@@ -55,6 +62,17 @@ impl PlexFolderScannerApi for PlexFolderScanner {
         section_ids
             .iter()
             .try_for_each(|section_id| self.scan(section_id, &plex_path))
+    }
+
+    fn scan_downloaded_video(&self, output_dir: &Path, folder: &str) -> anyhow::Result<()> {
+        let in_season_dir = folder
+            .split_once('/')
+            .is_some_and(|(first, _)| is_season_dir(first));
+        if in_season_dir {
+            self.scan_folder(output_dir)
+        } else {
+            self.scan_folder(&output_dir.join(folder))
+        }
     }
 }
 

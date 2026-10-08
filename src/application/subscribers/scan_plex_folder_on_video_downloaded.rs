@@ -9,7 +9,8 @@ struct VideoDownloadedPayload {
     folder: String,
 }
 
-/// Reacts to `VideoDownloaded` by asking Plex to scan the video's folder.
+/// Reacts to `VideoDownloaded` by asking Plex to scan the video's folder
+/// (its show folder, for a TV-layout episode).
 /// Registered only when the Plex integration and `YARRTUBE_PLEX_VIDEOS_PATH`
 /// are configured. A Plex failure fails the event, so it is retried.
 pub struct ScanPlexFolderOnVideoDownloaded {
@@ -26,7 +27,7 @@ impl EventSubscriber for ScanPlexFolderOnVideoDownloaded {
     fn handle(&self, payload: &str) -> anyhow::Result<()> {
         let payload: VideoDownloadedPayload = serde_json::from_str(payload)?;
         self.scanner
-            .scan_folder(&Path::new(&payload.output_dir).join(&payload.folder))
+            .scan_downloaded_video(Path::new(&payload.output_dir), &payload.folder)
     }
 }
 
@@ -85,6 +86,34 @@ mod tests {
         assert_eq!(
             plex_repository.mutations(),
             vec!["scan:21:/volume1/media/yarrtube/channels/Some Channel/Some video".to_string()]
+        );
+    }
+
+    #[test]
+    fn it_should_scan_the_show_folder_of_a_tv_layout_episode() {
+        let plex_repository = Arc::new(
+            FakePlexCollectionRepository::default()
+                .with_location("14", "/volume1/media/yarrtube/channels"),
+        );
+        let subscriber = ScanPlexFolderOnVideoDownloaded::new(PlexFolderScanner::new(
+            vec!["14".to_string()],
+            "/videos",
+            "/volume1/media/yarrtube",
+            plex_repository.clone(),
+        ));
+
+        let result = handle(
+            &subscriber,
+            &payload(
+                "/videos/channels/Some Channel",
+                "Season 2026/S2026E01021530 - Some video",
+            ),
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            plex_repository.mutations(),
+            vec!["scan:14:/volume1/media/yarrtube/channels/Some Channel".to_string()]
         );
     }
 

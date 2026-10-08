@@ -1,13 +1,15 @@
 use crate::domain::event::DomainEvent;
+use crate::domain::services::delete_video_entry;
 use crate::domain::services::{MetadataGenerator, MetadataGeneratorApi};
-use crate::domain::shared::Quality;
+use crate::domain::shared::{LibraryLayout, Quality};
 use crate::domain::video::Video;
 use crate::domain::video::VideoDownloaded;
 use crate::domain::video::VideoRecordId;
 use crate::domain::video::thumbnail_filename::expected_thumbnail_filename;
 use crate::domain::video::top_level_entry;
-use crate::domain::video::video_filename::VideoFilename;
-use crate::domain::video_metadata::VideoMetadata;
+use crate::domain::video::video_filename::{VideoFilename, episode_folder_name};
+use crate::domain::video::{entry_location, video_entry};
+use crate::domain::video_metadata::{EpisodeNumber, NfoFile, VideoMetadata};
 use crate::infrastructure::repositories::filesystem_video_file_repository::VideoFileRepository;
 use crate::infrastructure::repositories::sqlite_playlist_video_repository::PlaylistVideoRepository;
 use crate::infrastructure::repositories::sqlite_video_metadata_repository::VideoMetadataRepository;
@@ -74,6 +76,36 @@ fn log_sabr(video: &Video, sabr_notice: Option<&str>) {
     }
 }
 
+/// The folder a download writes into, relative to the output dir, the base
+/// filename it asks `yt-dlp` for, and whether the folder was created for
+/// this attempt (and so is removed again if the attempt fails).
+struct PreparedFolder {
+    folder: String,
+    desired_filename: String,
+    /// The base name the media file, thumbnail and NFO share.
+    basename: String,
+    /// The video's entry (see `video_entry`), what cleanup deletes.
+    entry: String,
+    fresh: bool,
+}
+
+impl PreparedFolder {
+    /// Where the video's files already live (e.g. a thumbnail fetched ahead
+    /// of the download), keeping their base name: a TV-layout entry
+    /// `"Season N/<base>"` reuses its season folder and base name, any other
+    /// entry its own folder, named after it.
+    fn reused(entry: &str) -> Self {
+        let (folder, basename) = entry_location(entry);
+        Self {
+            folder: folder.to_string(),
+            desired_filename: basename.to_string(),
+            basename: basename.to_string(),
+            entry: entry.to_string(),
+            fresh: false,
+        }
+    }
+}
+
 /// Downloads one video via `yt-dlp`, transitioning it through in-progress to
 /// downloaded/errored. Container-agnostic: the caller (a task handler)
 /// already resolved the video's owning container's quality and output
@@ -88,6 +120,7 @@ pub struct VideoDownloader {
     video_metadata_repository: Arc<dyn VideoMetadataRepository>,
     event_publisher: Arc<dyn EventPublisher>,
     clock: Arc<dyn Clock>,
+    layout: LibraryLayout,
 }
 
 impl VideoDownloader {
@@ -101,6 +134,7 @@ impl VideoDownloader {
         video_metadata_repository: Arc<dyn VideoMetadataRepository>,
         event_publisher: Arc<dyn EventPublisher>,
         clock: Arc<dyn Clock>,
+        layout: LibraryLayout,
     ) -> Self {
         Self {
             video_repository,
@@ -111,6 +145,7 @@ impl VideoDownloader {
             video_metadata_repository,
             event_publisher,
             clock,
+            layout,
         }
     }
 }
@@ -149,8 +184,17 @@ impl VideoDownloaderApi for VideoDownloader {
 
         let started = video.start_download(self.clock.now());
         self.video_repository.update(&started)?;
-        let metadata = self.fetch_metadata(&started);
-        match self.run_download(&started, quality, output_dir, metadata.as_ref()) {
+        let (metadata, sort_position) = self.fetch_metadata(&started);
+        if self.layout == LibraryLayout::Tv && metadata.is_none() {
+            return self.fail_without_metadata(started, is_last_attempt);
+        }
+        match self.run_download(
+            &started,
+            quality,
+            output_dir,
+            metadata.as_ref(),
+            sort_position,
+        ) {
             Ok(DownloadAttempt::Succeeded(downloaded)) => {
                 log_sabr(&started, downloaded.sabr_notice.as_deref());
                 self.record_unless_deleted(started, downloaded, quality, output_dir, metadata)
@@ -170,9 +214,9 @@ impl VideoDownloaderApi for VideoDownloader {
 impl VideoDownloader {
     /// Resolves the video's folder before `yt-dlp` runs, reusing the one a
     /// thumbnail fetched ahead of the download already created, if any, and
-    /// writes `movie.nfo` into it first, so a media scanner never sees the
-    /// video without it. When the download doesn't succeed, that
-    /// `movie.nfo` is removed, and so is a folder freshly created for this
+    /// writes its NFO into it first, so a media scanner never sees the
+    /// video without it. When the download doesn't succeed, that NFO is
+    /// removed, and so is a folder freshly created for this
     /// attempt, so a retry's collision check reuses the same folder name
     /// instead of suffixing it.
     fn run_download(
@@ -181,7 +225,66 @@ impl VideoDownloader {
         quality: Quality,
         output_dir: &Path,
         metadata: Option<&VideoMetadata>,
+        sort_position: Option<i64>,
     ) -> anyhow::Result<DownloadAttempt> {
+        let prepared = self.prepare_video_folder(video, output_dir, metadata, sort_position)?;
+        let folder = prepared.folder.as_str();
+        let video_dir = output_dir.join(folder);
+        let basename = prepared.basename.as_str();
+        let nfo = metadata.map(|metadata| {
+            let ahead = metadata.clone().with_thumb(Some(format!("{basename}.jpg")));
+            self.nfo_file(&ahead, basename)
+        });
+        if let Some(nfo) = &nfo {
+            self.write_nfo_ahead(video, nfo, &video_dir);
+        }
+        info!(video_id = %video.id, "downloading video");
+        let attempt = self.video_downloader_repository.download(
+            &video.youtube_id.to_url(),
+            &prepared.desired_filename,
+            video.youtube_id.as_str(),
+            quality,
+            output_dir,
+            Some(folder),
+        );
+        if !matches!(attempt, Ok(DownloadAttempt::Succeeded(_))) {
+            if let Some(nfo) = &nfo {
+                self.remove_nfo(video, &nfo.filename, &video_dir);
+            }
+            if prepared.fresh {
+                self.remove_fresh_entry(video, output_dir, &prepared.entry);
+            }
+        }
+        attempt
+    }
+
+    /// In the TV layout (once the metadata gives the publish time) the
+    /// video's episode folder inside its season folder; otherwise its
+    /// title-named folder, reusing one a thumbnail fetched ahead of the
+    /// download already created.
+    fn prepare_video_folder(
+        &self,
+        video: &Video,
+        output_dir: &Path,
+        metadata: Option<&VideoMetadata>,
+        sort_position: Option<i64>,
+    ) -> anyhow::Result<PreparedFolder> {
+        match (self.layout, metadata, video.recorded_video_entry()) {
+            (LibraryLayout::Tv, Some(_), Some(folder)) => Ok(PreparedFolder::reused(folder)),
+            (LibraryLayout::Tv, Some(metadata), None) => self.prepare_episode_folder(
+                video,
+                output_dir,
+                EpisodeNumber::resolve(metadata.published_at, sort_position),
+            ),
+            _ => self.prepare_movie_folder(video, output_dir),
+        }
+    }
+
+    fn prepare_movie_folder(
+        &self,
+        video: &Video,
+        output_dir: &Path,
+    ) -> anyhow::Result<PreparedFolder> {
         let filename = VideoFilename::from_title(&video.title);
         let existing_folder = video.thumbnail_filename.as_deref().map(top_level_entry);
         let folder = self.video_downloader_repository.prepare_folder(
@@ -190,54 +293,68 @@ impl VideoDownloader {
             output_dir,
             existing_folder,
         )?;
-        let video_dir = output_dir.join(&folder);
-        if let Some(metadata) = metadata {
-            self.write_nfo_ahead(video, metadata, &video_dir, &folder);
-        }
-        info!(video_id = %video.id, "downloading video");
-        let attempt = self.video_downloader_repository.download(
-            &video.youtube_id.to_url(),
-            filename.as_str(),
+        Ok(PreparedFolder {
+            desired_filename: filename.as_str().to_string(),
+            basename: folder.clone(),
+            entry: folder.clone(),
+            folder,
+            fresh: existing_folder.is_none(),
+        })
+    }
+
+    fn prepare_episode_folder(
+        &self,
+        video: &Video,
+        output_dir: &Path,
+        episode: EpisodeNumber,
+    ) -> anyhow::Result<PreparedFolder> {
+        let name = episode_folder_name(episode, &video.title);
+        let season_dir = episode.season_dir();
+        let basename = self.video_downloader_repository.prepare_episode(
+            &output_dir.join(&season_dir),
+            name.as_str(),
             video.youtube_id.as_str(),
-            quality,
-            output_dir,
-            Some(&folder),
-        );
-        if !matches!(attempt, Ok(DownloadAttempt::Succeeded(_))) {
-            self.remove_nfo(video, &video_dir);
-            if existing_folder.is_none() {
-                self.remove_fresh_folder(video, output_dir, &folder);
-            }
+        )?;
+        Ok(PreparedFolder {
+            entry: format!("{season_dir}/{basename}"),
+            folder: season_dir,
+            desired_filename: basename.clone(),
+            basename,
+            fresh: true,
+        })
+    }
+
+    /// In the TV layout, an episode NFO named after the media file's
+    /// `basename` when it carries an episode number; otherwise `movie.nfo`.
+    fn nfo_file(&self, metadata: &VideoMetadata, basename: &str) -> NfoFile {
+        match (self.layout, EpisodeNumber::parse_prefix(basename)) {
+            (LibraryLayout::Tv, Some(episode)) => NfoFile::episode(metadata, episode, basename),
+            _ => NfoFile::movie(metadata),
         }
-        attempt
     }
 
     /// Best-effort: without it the video still downloads, and Plex then
-    /// imports it before its `movie.nfo` exists, as before this step.
-    fn write_nfo_ahead(
-        &self,
-        video: &Video,
-        metadata: &VideoMetadata,
-        video_dir: &Path,
-        folder: &str,
-    ) {
-        let ahead = metadata.clone().with_thumb(Some(format!("{folder}.jpg")));
-        if let Err(e) = self.video_metadata_repository.write_nfo(&ahead, video_dir) {
-            warn!(video_id = %video.id, error = %e, "failed to write movie.nfo ahead of the download");
+    /// imports it before its NFO exists, as before this step.
+    fn write_nfo_ahead(&self, video: &Video, nfo: &NfoFile, video_dir: &Path) {
+        if let Err(e) = self.video_metadata_repository.write_nfo(nfo, video_dir) {
+            warn!(video_id = %video.id, error = %e, "failed to write the NFO ahead of the download");
         }
     }
 
-    /// Best-effort: a stale `movie.nfo` next to no media is ignored by Plex
-    /// and overwritten by the next attempt.
-    fn remove_nfo(&self, video: &Video, video_dir: &Path) {
-        if let Err(e) = self.video_metadata_repository.remove_nfo(video_dir) {
+    /// Best-effort: a stale NFO next to no media is ignored by Plex and
+    /// overwritten by the next attempt.
+    fn remove_nfo(&self, video: &Video, nfo_filename: &str, video_dir: &Path) {
+        if let Err(e) = self
+            .video_metadata_repository
+            .remove_nfo(nfo_filename, video_dir)
+        {
             warn!(video_id = %video.id, error = %e, "failed to remove movie.nfo of a download that did not succeed");
         }
     }
 
-    /// Best-effort: a leftover folder only costs the retry a suffixed name.
-    fn remove_fresh_folder(&self, video: &Video, output_dir: &Path, folder: &str) {
-        if let Err(e) = self.video_file_repository.delete(output_dir, folder) {
+    /// Best-effort: leftovers only cost the retry a suffixed name.
+    fn remove_fresh_entry(&self, video: &Video, output_dir: &Path, entry: &str) {
+        if let Err(e) = delete_video_entry(self.video_file_repository.as_ref(), output_dir, entry) {
             warn!(video_id = %video.id, error = %e, "failed to remove the folder of a download that did not succeed");
         }
     }
@@ -263,11 +380,10 @@ impl VideoDownloader {
     /// Best-effort: a folder that can't be removed is logged, and the next
     /// reconcile's orphan sweep (if the container still exists) removes it.
     fn discard_download(&self, video: &Video, downloaded: &DownloadedVideo, output_dir: &Path) {
-        info!(video_id = %video.id, folder = %downloaded.folder, "video deleted during its download, removing the downloaded folder");
-        if let Err(e) = self
-            .video_file_repository
-            .delete(output_dir, &downloaded.folder)
-        {
+        let recorded = format!("{}/{}", downloaded.folder, downloaded.filename);
+        let entry = video_entry(&recorded);
+        info!(video_id = %video.id, entry = %entry, "video deleted during its download, removing the downloaded files");
+        if let Err(e) = delete_video_entry(self.video_file_repository.as_ref(), output_dir, entry) {
             warn!(video_id = %video.id, error = %e, "failed to remove the folder of a download whose video was deleted");
         }
     }
@@ -391,6 +507,18 @@ impl VideoDownloader {
         Err(anyhow::anyhow!(error_message))
     }
 
+    /// In the TV layout the publish time names the episode, so without the
+    /// video's YouTube metadata `yt-dlp` isn't run: the video is marked
+    /// errored and the task retried, like a failed download.
+    fn fail_without_metadata(&self, started: Video, is_last_attempt: bool) -> anyhow::Result<()> {
+        let video_id = started.id.clone();
+        self.mark_errored(started, is_last_attempt)?;
+        warn!(video_id = %video_id, "YouTube metadata unavailable, not downloading the episode");
+        Err(anyhow::anyhow!(
+            "YouTube metadata unavailable, needed to name the episode"
+        ))
+    }
+
     /// A systemic download error: marks the video errored and propagates
     /// the error so the task queue retries/dead-letters it.
     fn record_errored(
@@ -421,7 +549,7 @@ impl VideoDownloader {
     /// metadata generation never fails or retries the download itself, and a
     /// skipped/failed attempt self-heals on the next reconcile pass (see
     /// `InternalVideoReconciler`).
-    fn fetch_metadata(&self, video: &Video) -> Option<VideoMetadata> {
+    fn fetch_metadata(&self, video: &Video) -> (Option<VideoMetadata>, Option<i64>) {
         let playlist_position = match self.playlist_video_repository.find_by_video(&video.id) {
             Ok(playlist_video) => playlist_video.map(|pv| pv.position),
             Err(e) => {
@@ -429,11 +557,13 @@ impl VideoDownloader {
                 None
             }
         };
-        self.metadata_generator
-            .generate(video, playlist_position, None)
+        let metadata = self
+            .metadata_generator
+            .generate(video, playlist_position, None);
+        (metadata, playlist_position)
     }
 
-    /// Saves the downloaded `video`'s `movie.nfo` and records its metadata,
+    /// Saves the downloaded `video`'s NFO and records its metadata,
     /// referencing the thumbnail actually downloaded. When the fetch before
     /// the download failed, it is attempted once more here. A failure is
     /// logged and swallowed, never failing the download.
@@ -444,13 +574,20 @@ impl VideoDownloader {
         thumbnail_filename: Option<&str>,
         metadata: Option<VideoMetadata>,
     ) {
-        let Some(metadata) = metadata.or_else(|| self.fetch_metadata(video)) else {
+        let Some(metadata) = metadata.or_else(|| self.fetch_metadata(video).0) else {
             return;
         };
         let video_metadata = metadata.with_thumb(thumbnail_filename.map(str::to_string));
-        if let Err(e) = self
-            .video_metadata_repository
-            .save(&video.id, &video_metadata, video_dir)
+        let media_stem = video
+            .filename
+            .as_deref()
+            .and_then(|f| Path::new(f).file_stem())
+            .and_then(|f| f.to_str())
+            .unwrap_or_default();
+        let nfo = self.nfo_file(&video_metadata, media_stem);
+        if let Err(e) =
+            self.video_metadata_repository
+                .save(&video.id, &video_metadata, &nfo, video_dir)
         {
             warn!(video_id = %video.id, error = %e, "failed to save video metadata");
         }

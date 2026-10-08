@@ -1,5 +1,6 @@
 use crate::domain::shared::Quality;
 use crate::domain::video::video_filename::collision_suffixed_folder;
+use crate::domain::video::{is_named_after, is_season_dir};
 use anyhow::{Result, anyhow};
 use std::io;
 use std::path::Path;
@@ -147,6 +148,22 @@ pub fn prepare_folder(
     Ok(prepare_video_dir(output_path, desired_filename, video_id, existing_folder)?.folder)
 }
 
+/// Creates `season_dir` if missing and returns the base name a TV-layout
+/// episode's files take inside it: `desired_name`, or this video's
+/// collision-suffixed name when another file there already uses it.
+pub fn prepare_episode(season_dir: &Path, desired_name: &str, video_id: &str) -> Result<String> {
+    ensure_output_dir(season_dir)?;
+    let taken = std::fs::read_dir(season_dir)
+        .map_err(|e| anyhow!("Failed to list season folder {season_dir:?}: {e}"))?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .any(|name| is_named_after(&name, desired_name));
+    Ok(if taken {
+        collision_suffixed_folder(desired_name, video_id)
+    } else {
+        desired_name.to_string()
+    })
+}
+
 pub fn download_video(
     ytdlp_path: &Path,
     video_url: &str,
@@ -161,7 +178,7 @@ pub fn download_video(
         path: video_dir,
     } = prepare_video_dir(output_path, desired_filename, video_id, existing_folder)?;
 
-    let output_template = format!("{folder}.%(ext)s");
+    let output_template = output_template(&folder, desired_filename);
     let mut args = args_for_quality(quality);
     args.extend([
         "--concurrent-fragments".to_string(),
@@ -307,7 +324,7 @@ pub fn fetch_thumbnail(
         path: video_dir,
     } = prepare_video_dir(output_path, desired_filename, video_id, existing_folder)?;
 
-    let output_template = format!("{folder}.%(ext)s");
+    let output_template = output_template(&folder, desired_filename);
     let mut cmd = Command::new(ytdlp_path);
     cmd.args([
         "--skip-download",
@@ -580,6 +597,20 @@ fn prepare_video_dir(
     };
     let path = output_path.join(&folder);
     Ok(VideoDir { folder, path })
+}
+
+/// `yt-dlp`'s `-o` template, run inside the video's folder: inside a
+/// TV-layout season folder (shared by many episodes) the file takes the
+/// desired episode name; otherwise it is named after the folder's last path
+/// component, as each video owns its folder.
+fn output_template(folder: &str, desired_filename: &str) -> String {
+    let last = folder.rsplit('/').next().unwrap_or(folder);
+    let name = if is_season_dir(last) {
+        desired_filename
+    } else {
+        last
+    };
+    format!("{name}.%(ext)s")
 }
 
 /// Removes `video_dir`, unless it's a folder reused via `existing_folder`
@@ -1859,6 +1890,133 @@ mod tests {
         assert!(
             fake.captured_args()
                 .contains(&"My Video.%(ext)s".to_string())
+        );
+        std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_claim_an_episode_name_in_a_missing_season_dir() {
+        use test_support::unique_temp_dir;
+
+        let output_dir = unique_temp_dir("ytdlp-prepare-episode");
+
+        let result = prepare_episode(
+            &output_dir.join("Season 2026"),
+            "S2026E01021530 - T",
+            "vid1",
+        );
+
+        assert_eq!(
+            (
+                result.unwrap(),
+                output_dir.join("Season 2026").is_dir(),
+                std::fs::read_dir(output_dir.join("Season 2026"))
+                    .map(|entries| entries.count())
+                    .ok()
+            ),
+            ("S2026E01021530 - T".to_string(), true, Some(0))
+        );
+        std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_suffix_an_episode_name_already_used_in_the_season_dir() {
+        use test_support::unique_temp_dir;
+
+        let output_dir = unique_temp_dir("ytdlp-prepare-episode-collision");
+        let season_dir = output_dir.join("Season 2026");
+        std::fs::create_dir_all(&season_dir).unwrap();
+        std::fs::write(season_dir.join("S2026E01021530 - Live.mp4"), "mp4").unwrap();
+        std::fs::write(season_dir.join("S2026E01021530 - Live Again.mp4"), "mp4").unwrap();
+
+        let taken = prepare_episode(&season_dir, "S2026E01021530 - Live", "vid1");
+        let free = prepare_episode(&season_dir, "S2026E01021530 - Live Ag", "vid2");
+
+        assert_eq!(
+            (taken.unwrap(), free.unwrap()),
+            (
+                "S2026E01021530 - Live [vid1]".to_string(),
+                "S2026E01021530 - Live Ag".to_string()
+            )
+        );
+        std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_create_a_missing_season_dir_when_preparing_a_folder() {
+        use test_support::unique_temp_dir;
+
+        let output_dir = unique_temp_dir("ytdlp-prepare-season-dir");
+
+        let result = prepare_folder(
+            &output_dir.join("Season 2026"),
+            "S2026E01021530 - T",
+            "vid1",
+            None,
+        );
+
+        assert_eq!(
+            (
+                result.unwrap(),
+                output_dir.join("Season 2026/S2026E01021530 - T").is_dir()
+            ),
+            ("S2026E01021530 - T".to_string(), true)
+        );
+        std::fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn it_should_name_the_file_after_the_desired_name_inside_a_season_folder() {
+        use test_support::{FakeYtDlp, unique_temp_dir};
+
+        let output_dir = unique_temp_dir("ytdlp-season-folder");
+        let folder = "Season 2026";
+        let download = FakeYtDlp::with_exit_code(0);
+        let thumbnail = FakeYtDlp::with_stdout("S2026E01021530 - T.jpg\n");
+
+        let downloaded = unwrap_succeeded(
+            download_video(
+                &download.path,
+                "https://example.com/video",
+                "S2026E01021530 - T",
+                "vid1",
+                Quality::High,
+                &output_dir,
+                Some(folder),
+            )
+            .unwrap(),
+        );
+        let fetched = fetch_thumbnail(
+            &thumbnail.path,
+            "https://example.com/video",
+            "S2026E01021530 - T",
+            "vid1",
+            &output_dir,
+            Some(folder),
+        )
+        .unwrap();
+
+        assert_eq!(
+            (
+                downloaded.folder,
+                download
+                    .captured_args()
+                    .contains(&"S2026E01021530 - T.%(ext)s".to_string()),
+                fetched,
+                thumbnail
+                    .captured_args()
+                    .contains(&"S2026E01021530 - T.%(ext)s".to_string()),
+            ),
+            (
+                folder.to_string(),
+                true,
+                ThumbnailFetch::Fetched(FetchedThumbnail {
+                    folder: folder.to_string(),
+                    filename: "S2026E01021530 - T.jpg".to_string(),
+                }),
+                true,
+            )
         );
         std::fs::remove_dir_all(&output_dir).unwrap();
     }

@@ -1,4 +1,4 @@
-use super::VideoMetadata;
+use super::{EpisodeNumber, ShowMetadata, VideoMetadata};
 use quick_xml::escape::escape;
 
 fn element(tag: &str, value: &str) -> String {
@@ -23,10 +23,7 @@ pub fn render_movie_nfo(metadata: &VideoMetadata) -> String {
     for tag in &metadata.tags {
         body.push_str(&element("tag", tag));
     }
-    body.push_str(&format!(
-        r#"<uniqueid type="youtube">{}</uniqueid>"#,
-        escape(&metadata.uniqueid)
-    ));
+    body.push_str(&youtube_uniqueid(&metadata.uniqueid));
     if let Some(thumb) = &metadata.thumb {
         body.push_str(&element("thumb", thumb));
     }
@@ -34,9 +31,48 @@ pub fn render_movie_nfo(metadata: &VideoMetadata) -> String {
     format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><movie>{body}</movie>"#)
 }
 
+/// Renders a TV-layout episode NFO's XML content (root `episodedetails`),
+/// escaped like `render_movie_nfo`.
+pub fn render_episode_nfo(metadata: &VideoMetadata, episode: EpisodeNumber) -> String {
+    let mut body = String::new();
+    body.push_str(&element("title", &metadata.title));
+    body.push_str(&element("season", &episode.season.to_string()));
+    body.push_str(&element("episode", &episode.episode.to_string()));
+    body.push_str(&element("plot", &metadata.plot));
+    body.push_str(&element("aired", &metadata.premiered()));
+    body.push_str(&element("director", &metadata.director));
+    body.push_str(&youtube_uniqueid(&metadata.uniqueid));
+    if let Some(thumb) = &metadata.thumb {
+        body.push_str(&element("thumb", thumb));
+    }
+
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><episodedetails>{body}</episodedetails>"#
+    )
+}
+
+/// Renders a TV-layout show's `tvshow.nfo` XML content (root `tvshow`),
+/// escaped like `render_movie_nfo`.
+pub fn render_tvshow_nfo(show: &ShowMetadata) -> String {
+    let mut body = String::new();
+    body.push_str(&element("title", &show.title));
+    body.push_str(&element("studio", &show.studio));
+    body.push_str(&youtube_uniqueid(&show.uniqueid));
+
+    format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><tvshow>{body}</tvshow>"#)
+}
+
+fn youtube_uniqueid(id: &str) -> String {
+    format!(r#"<uniqueid type="youtube">{}</uniqueid>"#, escape(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::channel::{Channel, ChannelHandle, VideoLimit};
+    use crate::domain::playlist::PlaylistPath;
+    use crate::domain::shared::Quality;
+    use crate::domain::video_metadata::NfoFile;
     use chrono::{DateTime, Utc};
 
     fn metadata() -> VideoMetadata {
@@ -55,6 +91,67 @@ mod tests {
             "0001 My Video",
             DateTime::<Utc>::UNIX_EPOCH,
         )
+    }
+
+    #[test]
+    fn it_should_render_a_well_formed_episode_nfo() {
+        let metadata = VideoMetadata {
+            title: "A & <b> \"q\" 'a'".to_string(),
+            thumb: Some("S2024E01020304 - My Video.jpg".to_string()),
+            ..metadata()
+        };
+        let episode = EpisodeNumber::for_channel_video(metadata.published_at);
+
+        let nfo = NfoFile::episode(&metadata, episode, "S2024E01020304 - My Video");
+
+        parses_as_valid_xml(&nfo.content);
+        assert_eq!(
+            nfo,
+            NfoFile {
+                filename: "S2024E01020304 - My Video.nfo".to_string(),
+                content: concat!(
+                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><episodedetails>"#,
+                    "<title>A &amp; &lt;b&gt; &quot;q&quot; &apos;a&apos;</title>",
+                    "<season>2024</season>",
+                    "<episode>1020304</episode>",
+                    "<plot>A description</plot>",
+                    "<aired>2024-01-02</aired>",
+                    "<director>My Channel</director>",
+                    r#"<uniqueid type="youtube">yt1</uniqueid>"#,
+                    "<thumb>S2024E01020304 - My Video.jpg</thumb>",
+                    "</episodedetails>"
+                )
+                .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn it_should_render_a_well_formed_tvshow_nfo() {
+        let channel = Channel::create(
+            ChannelHandle::new("@rock").unwrap(),
+            "Rock & Roll",
+            "UCabc",
+            Quality::High,
+            VideoLimit::new(10).unwrap(),
+            PlaylistPath::new("channels/rock").unwrap(),
+            None,
+            DateTime::<Utc>::UNIX_EPOCH,
+        );
+
+        let xml = render_tvshow_nfo(&ShowMetadata::for_channel(&channel));
+
+        parses_as_valid_xml(&xml);
+        assert_eq!(
+            xml,
+            concat!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><tvshow>"#,
+                "<title>Rock &amp; Roll</title>",
+                "<studio>Rock &amp; Roll</studio>",
+                r#"<uniqueid type="youtube">UCabc</uniqueid>"#,
+                "</tvshow>"
+            )
+        );
     }
 
     fn parses_as_valid_xml(xml: &str) {

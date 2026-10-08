@@ -1,4 +1,5 @@
 use crate::domain::video::VideoId;
+use crate::domain::video_metadata::EpisodeNumber;
 use std::fmt;
 use unicode_general_category::get_general_category;
 use unicode_normalization::UnicodeNormalization;
@@ -43,6 +44,12 @@ impl fmt::Display for VideoFilename {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// A TV-layout episode's folder and media base name,
+/// `"S2026E01021530 - Title"`, sanitized and truncated like a title.
+pub fn episode_folder_name(episode: EpisodeNumber, title: &str) -> VideoFilename {
+    VideoFilename::from_title(&format!("{} - {title}", episode.code()))
 }
 
 /// The folder names a download of this video may be writing into: the bare

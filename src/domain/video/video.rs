@@ -2,6 +2,7 @@ use super::playback_position::PlaybackPosition;
 use super::video_duration::VideoDuration;
 use super::video_filename::video_folder_candidates;
 use super::video_id::VideoId;
+use super::video_output_entry::video_entry;
 use super::video_record_id::VideoRecordId;
 use super::video_status::VideoStatus;
 use crate::domain::shared::Quality;
@@ -269,6 +270,17 @@ impl Video {
     /// nor an `Errored` one, whose recovery redownload writes its own.
     pub fn is_thumbnail_fetchable(&self) -> bool {
         !matches!(self.status, VideoStatus::Excluded | VideoStatus::Errored)
+    }
+
+    /// The per-video folder this video's files already live in: the
+    /// `video_entry` of its recorded filename, else of its recorded
+    /// thumbnail (one fetched ahead of the download). `None` before either
+    /// is recorded.
+    pub fn recorded_video_entry(&self) -> Option<&str> {
+        self.filename
+            .as_deref()
+            .or(self.thumbnail_filename.as_deref())
+            .map(video_entry)
     }
 
     /// The folders a download or thumbnail fetch of this video may be writing

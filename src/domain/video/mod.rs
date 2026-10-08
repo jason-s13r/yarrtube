@@ -26,7 +26,10 @@ pub use sourced_video::{SourcedVideo, VideoSource};
 pub use video::Video;
 pub use video_duration::VideoDuration;
 pub use video_id::VideoId;
-pub use video_output_entry::{resolve_output_dir, top_level_entry, video_dir_for_filename};
+pub use video_output_entry::{
+    entry_location, entry_owns, is_named_after, is_season_dir, resolve_output_dir,
+    strip_episode_prefix, top_level_entry, video_dir_for_filename, video_entry,
+};
 pub use video_record_id::VideoRecordId;
 pub use video_status::VideoStatus;
 pub use video_view::VideoView;

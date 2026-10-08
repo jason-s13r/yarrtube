@@ -21,6 +21,16 @@ pub trait VideoDownloaderRepository: Send + Sync {
         existing_folder: Option<&str>,
     ) -> anyhow::Result<String>;
 
+    /// Creates the TV-layout `season_dir` if missing and returns the base
+    /// name the episode's files take in it: `desired_name`, or its
+    /// collision-suffixed form when another file there already uses it.
+    fn prepare_episode(
+        &self,
+        season_dir: &Path,
+        desired_name: &str,
+        video_id: &str,
+    ) -> anyhow::Result<String>;
+
     /// Returns `Ok(DownloadAttempt::Succeeded(..))` with the exact filename
     /// `yt-dlp` saved (and its duration, when known) on a successful
     /// download, `Ok(DownloadAttempt::Failed { stderr })` for a clean
@@ -88,6 +98,15 @@ impl VideoDownloaderRepository for YtDlpVideoDownloaderRepository {
         existing_folder: Option<&str>,
     ) -> anyhow::Result<String> {
         ytdlp::prepare_folder(output_dir, desired_filename, video_id, existing_folder)
+    }
+
+    fn prepare_episode(
+        &self,
+        season_dir: &Path,
+        desired_name: &str,
+        video_id: &str,
+    ) -> anyhow::Result<String> {
+        ytdlp::prepare_episode(season_dir, desired_name, video_id)
     }
 
     fn download(
@@ -170,6 +189,18 @@ pub struct FakeVideoDownloaderRepository {
     #[allow(clippy::type_complexity)]
     pub(crate) thumbnail_calls:
         std::sync::Mutex<Vec<(String, String, String, std::path::PathBuf, Option<String>)>>,
+    /// Every `prepare_folder` call: (output dir, desired filename, video id,
+    /// existing folder).
+    #[allow(clippy::type_complexity)]
+    pub(crate) prepare_folder_calls:
+        std::sync::Mutex<Vec<(std::path::PathBuf, String, String, Option<String>)>>,
+    /// Every `prepare_episode` call: (season dir, desired name, video id).
+    #[allow(clippy::type_complexity)]
+    pub(crate) prepare_episode_calls: std::sync::Mutex<Vec<(std::path::PathBuf, String, String)>>,
+    /// Resolves a fresh folder named after the desired filename, and reports
+    /// a successful download into whichever folder it was given, the way the
+    /// real adapter does, instead of the fixed fake folder.
+    pub(crate) echoes_folder: bool,
     /// Runs while `download` is in flight, e.g. to delete the video
     /// mid-download.
     #[allow(clippy::type_complexity)]
@@ -266,6 +297,25 @@ impl FakeVideoDownloaderRepository {
         }
     }
 
+    /// Succeeds, resolving and reporting folders the way the real adapter
+    /// does: a fresh folder is named after the desired filename, and the
+    /// download lands in the folder it was given, named after that folder's
+    /// last path component.
+    pub fn echoing() -> Self {
+        Self {
+            echoes_folder: true,
+            ..Self::new(true)
+        }
+    }
+
+    /// Like `echoing`, but the download fails cleanly.
+    pub fn echoing_failure() -> Self {
+        Self {
+            echoes_folder: true,
+            ..Self::new(false)
+        }
+    }
+
     /// Runs `hook` while `download` is in flight.
     pub fn with_on_download(self, hook: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
@@ -301,6 +351,9 @@ impl FakeVideoDownloaderRepository {
             calls: Default::default(),
             thumbnail_result: Default::default(),
             thumbnail_calls: Default::default(),
+            prepare_folder_calls: Default::default(),
+            prepare_episode_calls: Default::default(),
+            echoes_folder: false,
             on_download: None,
         }
     }
@@ -310,12 +363,37 @@ impl FakeVideoDownloaderRepository {
 impl VideoDownloaderRepository for FakeVideoDownloaderRepository {
     fn prepare_folder(
         &self,
-        _desired_filename: &str,
-        _video_id: &str,
-        _output_dir: &Path,
+        desired_filename: &str,
+        video_id: &str,
+        output_dir: &Path,
         existing_folder: Option<&str>,
     ) -> anyhow::Result<String> {
-        Ok(existing_folder.unwrap_or(FAKE_FRESH_FOLDER).to_string())
+        self.prepare_folder_calls.lock().unwrap().push((
+            output_dir.to_path_buf(),
+            desired_filename.to_string(),
+            video_id.to_string(),
+            existing_folder.map(str::to_string),
+        ));
+        let fresh = if self.echoes_folder {
+            desired_filename
+        } else {
+            FAKE_FRESH_FOLDER
+        };
+        Ok(existing_folder.unwrap_or(fresh).to_string())
+    }
+
+    fn prepare_episode(
+        &self,
+        season_dir: &Path,
+        desired_name: &str,
+        video_id: &str,
+    ) -> anyhow::Result<String> {
+        self.prepare_episode_calls.lock().unwrap().push((
+            season_dir.to_path_buf(),
+            desired_name.to_string(),
+            video_id.to_string(),
+        ));
+        Ok(desired_name.to_string())
     }
 
     fn download(
@@ -338,7 +416,18 @@ impl VideoDownloaderRepository for FakeVideoDownloaderRepository {
         if let Some(hook) = &self.on_download {
             hook();
         }
-        Ok(self.result.lock().unwrap().clone())
+        let result = self.result.lock().unwrap().clone();
+        match (self.echoes_folder, existing_folder, result) {
+            (true, Some(folder), DownloadAttempt::Succeeded(_)) => {
+                Ok(DownloadAttempt::Succeeded(DownloadedVideo {
+                    folder: folder.to_string(),
+                    filename: format!("{}.mp4", echoed_name(folder, desired_filename)),
+                    duration_seconds: None,
+                    sabr_notice: None,
+                }))
+            }
+            (_, _, result) => Ok(result),
+        }
     }
 
     fn fetch_thumbnail(
@@ -356,6 +445,12 @@ impl VideoDownloaderRepository for FakeVideoDownloaderRepository {
             output_dir.to_path_buf(),
             existing_folder.map(str::to_string),
         ));
+        if let (true, Some(folder)) = (self.echoes_folder, existing_folder) {
+            return Ok(ThumbnailFetch::Fetched(FetchedThumbnail {
+                folder: folder.to_string(),
+                filename: format!("{}.jpg", echoed_name(folder, desired_filename)),
+            }));
+        }
         match self.thumbnail_result.lock().unwrap().take() {
             Some(result) => result,
             None => Ok(ThumbnailFetch::Unavailable { reason: None }),
@@ -367,6 +462,18 @@ impl VideoDownloaderRepository for FakeVideoDownloaderRepository {
             DiagnoseOutcome::Reason(reason) => Ok(reason),
             DiagnoseOutcome::Error => Err(anyhow::anyhow!("fake diagnose error")),
         }
+    }
+}
+
+/// The base name the real adapter gives a file written into `folder`: the
+/// desired name inside a season folder, otherwise the folder's last component.
+#[cfg(test)]
+fn echoed_name<'a>(folder: &'a str, desired_filename: &'a str) -> &'a str {
+    let last = folder.rsplit('/').next().unwrap_or(folder);
+    if crate::domain::video::is_season_dir(last) {
+        desired_filename
+    } else {
+        last
     }
 }
 

@@ -40,9 +40,12 @@ mod tests {
     use crate::domain::playlist::{Playlist, PlaylistKind, PlaylistName, PlaylistPath};
     use crate::domain::services::InternalVideoReconciler;
     use crate::domain::services::MetadataGenerator;
+    use crate::domain::services::ShowMetadataWriter;
     use crate::domain::services::ThumbnailFetcher;
+    use crate::domain::shared::LibraryLayout;
     use crate::domain::shared::Quality;
     use crate::domain::task::{ScheduledTask, Task, TaskStatus};
+    use crate::infrastructure::repositories::filesystem_show_metadata_repository::FakeShowMetadataRepository;
     use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
     use crate::infrastructure::repositories::sqlite_playlist_repository::{
         PlaylistRepository, SqlitePlaylistRepository,
@@ -130,12 +133,23 @@ mod tests {
                     Arc::new(FakeVideoDownloaderRepository::default()),
                     task_repository.clone(),
                     Arc::new(FixedClock(fixed_timestamp())),
+                    Arc::new(MetadataGenerator::new(
+                        Arc::new(FakeYoutubeMetadataRepository::default()),
+                        Arc::new(FixedClock(fixed_timestamp())),
+                    )),
+                    Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                    LibraryLayout::Movie,
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
+            Arc::new(ShowMetadataWriter::new(
+                LibraryLayout::Movie,
+                Arc::new(FakeShowMetadataRepository::default()),
+                "/videos",
+            )),
         ));
 
         let result = handle(&subscriber, r#"{"playlist_id": "PL1"}"#);
@@ -188,6 +202,12 @@ mod tests {
             Arc::new(FakeVideoDownloaderRepository::default()),
             task_repository.clone(),
             Arc::new(FixedClock(fixed_timestamp())),
+            Arc::new(MetadataGenerator::new(
+                Arc::new(FakeYoutubeMetadataRepository::default()),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+            LibraryLayout::Movie,
         ));
         PlaylistVideoReconciler::new(
             playlist_repository,
@@ -211,6 +231,11 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
+            Arc::new(ShowMetadataWriter::new(
+                LibraryLayout::Movie,
+                Arc::new(FakeShowMetadataRepository::default()),
+                "/videos",
+            )),
         )
     }
 
@@ -248,12 +273,23 @@ mod tests {
                     Arc::new(FakeVideoDownloaderRepository::default()),
                     task_repository.clone(),
                     Arc::new(FixedClock(fixed_timestamp())),
+                    Arc::new(MetadataGenerator::new(
+                        Arc::new(FakeYoutubeMetadataRepository::default()),
+                        Arc::new(FixedClock(fixed_timestamp())),
+                    )),
+                    Arc::new(SqlitePlaylistVideoRepository::new(unused_connection())),
+                    LibraryLayout::Movie,
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
+            Arc::new(ShowMetadataWriter::new(
+                LibraryLayout::Movie,
+                Arc::new(FakeShowMetadataRepository::default()),
+                "/videos",
+            )),
         ))
     }
 

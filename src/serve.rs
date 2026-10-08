@@ -4,9 +4,11 @@ use crate::domain::services::{
     ChannelCreator, ChannelDeleter, ChannelPreviewer, ChannelVideoReconciler, ChannelViewSearcher,
     DirectorySearcher, InternalVideoReconciler, MetadataGenerator, PlaylistCreator,
     PlaylistDeleter, PlaylistPreviewer, PlaylistSearcher, PlaylistUpdater, PlaylistVideoReconciler,
-    PlexCollectionDeleter, PlexCollectionReconciler, PlexFolderScanner, TaskViewSearcher,
-    ThumbnailFetcher, VideoDownloader, VideoFileDeleter, VideoSearcher, VideoWatchStateUpdater,
+    PlexCollectionDeleter, PlexCollectionReconciler, PlexFolderScanner, ShowMetadataWriter,
+    TaskViewSearcher, ThumbnailFetcher, VideoDownloader, VideoFileDeleter, VideoSearcher,
+    VideoWatchStateUpdater,
 };
+use crate::domain::shared::LibraryLayout;
 use crate::infrastructure::client::ytdlp_updater::{RealYtdlpUpdater, YtdlpUpdater, target_path};
 use crate::infrastructure::infrastructure_container::{
     InfrastructureContainer, InfrastructureSettings,
@@ -14,6 +16,7 @@ use crate::infrastructure::infrastructure_container::{
 use crate::infrastructure::repositories::domain_events_consumer::{
     DomainEventsConsumer, SubscriberRegistry,
 };
+use crate::infrastructure::repositories::filesystem_show_metadata_repository::FilesystemShowMetadataRepository;
 use crate::infrastructure::repositories::plex_collection_repository::{
     HttpPlexCollectionRepository, PlexCollectionRepository, PlexConfig,
 };
@@ -262,9 +265,9 @@ fn build_infrastructure() -> Result<InfrastructureContainer> {
 }
 
 /// Must run before the task executor starts polling: requeues tasks a
-/// previous run left `running` and seeds the recurring yt-dlp self-update
-/// and, when the Plex integration is enabled, the recurring Plex
-/// collections reconcile.
+/// previous run left `running` and seeds the recurring yt-dlp self-update.
+/// With Plex collections on it seeds their recurring reconcile; with them
+/// off it removes one an earlier run left scheduled.
 fn prepare_task_queue(
     infrastructure: &InfrastructureContainer,
     task_executor: &TaskExecutor,
@@ -288,11 +291,16 @@ fn prepare_task_queue(
             &infrastructure.clock,
         )
         .context("failed to schedule the recurring Plex collections reconcile task")?;
+    } else {
+        tasks::reconcile_plex_collections_task::unschedule_reconcile_plex_collections(
+            &infrastructure.task_repository,
+        )
+        .context("failed to remove the Plex collections reconcile task")?;
     }
     Ok(())
 }
 
-fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
+fn api_services(infrastructure: &InfrastructureContainer, layout: LibraryLayout) -> ApiServices {
     ApiServices {
         playlist_creator: PlaylistCreator::new(
             infrastructure.playlist_repository.clone(),
@@ -311,7 +319,7 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
         ),
         playlist_searcher: PlaylistSearcher::new(infrastructure.playlist_repository.clone()),
         playlist_updater: PlaylistUpdater::new(infrastructure.playlist_repository.clone()),
-        playlist_video_reconciler: playlist_video_reconciler(infrastructure),
+        playlist_video_reconciler: playlist_video_reconciler(infrastructure, layout),
         video_searcher: VideoSearcher::new(
             infrastructure.playlist_repository.clone(),
             infrastructure.playlist_video_repository.clone(),
@@ -349,7 +357,7 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
             infrastructure.channel_video_repository.clone(),
             infrastructure.video_repository.clone(),
         ),
-        channel_video_reconciler: channel_video_reconciler(infrastructure),
+        channel_video_reconciler: channel_video_reconciler(infrastructure, layout),
         directory_searcher: DirectorySearcher::new(infrastructure.directory_repository.clone()),
         video_watch_state_updater: VideoWatchStateUpdater::new(
             infrastructure.video_repository.clone(),
@@ -363,22 +371,24 @@ fn api_services(infrastructure: &InfrastructureContainer) -> ApiServices {
 
 fn event_consumer(
     infrastructure: &InfrastructureContainer,
+    layout: LibraryLayout,
     plex: Option<PlexIntegration>,
 ) -> DomainEventsConsumer {
     DomainEventsConsumer::new(
         infrastructure.event_repository.clone(),
-        event_subscribers(infrastructure, plex),
+        event_subscribers(infrastructure, layout, plex),
         infrastructure.clock.clone(),
     )
 }
 
 fn event_subscribers(
     infrastructure: &InfrastructureContainer,
+    layout: LibraryLayout,
     plex: Option<PlexIntegration>,
 ) -> SubscriberRegistry {
     subscribers::registry(
-        playlist_video_reconciler(infrastructure),
-        channel_video_reconciler(infrastructure),
+        playlist_video_reconciler(infrastructure, layout),
+        channel_video_reconciler(infrastructure, layout),
         infrastructure.playlist_repository.clone(),
         infrastructure.channel_repository.clone(),
         infrastructure.task_repository.clone(),
@@ -409,11 +419,12 @@ fn plex_folder_scanner(plex: PlexIntegration) -> Option<PlexFolderScanner> {
 
 fn task_executor(
     infrastructure: &InfrastructureContainer,
+    layout: LibraryLayout,
     plex: Option<PlexIntegration>,
 ) -> TaskExecutor {
     TaskExecutor::new(
         infrastructure.task_repository.clone(),
-        task_handlers(infrastructure, plex),
+        task_handlers(infrastructure, layout, plex),
         infrastructure.clock.clone(),
         retry_base_delay_seconds(),
         download_concurrency(),
@@ -422,20 +433,21 @@ fn task_executor(
 
 fn task_handlers(
     infrastructure: &InfrastructureContainer,
+    layout: LibraryLayout,
     plex: Option<PlexIntegration>,
 ) -> HandlerRegistry {
     tasks::registry(
-        playlist_video_reconciler(infrastructure),
-        channel_video_reconciler(infrastructure),
-        video_downloader(infrastructure),
-        thumbnail_fetcher(infrastructure),
+        playlist_video_reconciler(infrastructure, layout),
+        channel_video_reconciler(infrastructure, layout),
+        video_downloader(infrastructure, layout),
+        thumbnail_fetcher(infrastructure, layout),
         infrastructure.video_repository.clone(),
         VideoFileDeleter::new(infrastructure.video_file_repository.clone(), videos_path()),
         infrastructure.task_repository.clone(),
         infrastructure.clock.clone(),
         infrastructure.ytdlp_updater.clone(),
         target_path(),
-        plex.map(|plex| {
+        plex.filter(|_| layout == LibraryLayout::Movie).map(|plex| {
             tasks::reconcile_plex_collections_task::ReconcilePlexCollectionsTask::new(
                 plex_collection_reconciler(infrastructure, plex),
                 infrastructure.task_repository.clone(),
@@ -462,7 +474,10 @@ fn plex_collection_reconciler(
     )
 }
 
-fn playlist_video_reconciler(infrastructure: &InfrastructureContainer) -> PlaylistVideoReconciler {
+fn playlist_video_reconciler(
+    infrastructure: &InfrastructureContainer,
+    layout: LibraryLayout,
+) -> PlaylistVideoReconciler {
     PlaylistVideoReconciler::new(
         infrastructure.playlist_repository.clone(),
         infrastructure.video_repository.clone(),
@@ -470,13 +485,17 @@ fn playlist_video_reconciler(infrastructure: &InfrastructureContainer) -> Playli
         infrastructure.youtube_playlist_items_repository.clone(),
         infrastructure.event_publisher.clone(),
         infrastructure.task_repository.clone(),
-        internal_video_reconciler(infrastructure),
+        internal_video_reconciler(infrastructure, layout),
         infrastructure.clock.clone(),
         reconcile_interval_seconds(),
+        show_metadata_writer(layout),
     )
 }
 
-fn channel_video_reconciler(infrastructure: &InfrastructureContainer) -> ChannelVideoReconciler {
+fn channel_video_reconciler(
+    infrastructure: &InfrastructureContainer,
+    layout: LibraryLayout,
+) -> ChannelVideoReconciler {
     ChannelVideoReconciler::new(
         infrastructure.channel_repository.clone(),
         infrastructure.video_repository.clone(),
@@ -484,13 +503,17 @@ fn channel_video_reconciler(infrastructure: &InfrastructureContainer) -> Channel
         infrastructure.channel_videos_repository.clone(),
         infrastructure.event_publisher.clone(),
         infrastructure.task_repository.clone(),
-        internal_video_reconciler(infrastructure),
+        internal_video_reconciler(infrastructure, layout),
         infrastructure.clock.clone(),
         reconcile_interval_seconds(),
+        show_metadata_writer(layout),
     )
 }
 
-fn video_downloader(infrastructure: &InfrastructureContainer) -> VideoDownloader {
+fn video_downloader(
+    infrastructure: &InfrastructureContainer,
+    layout: LibraryLayout,
+) -> VideoDownloader {
     VideoDownloader::new(
         infrastructure.video_repository.clone(),
         infrastructure.video_downloader_repository.clone(),
@@ -500,6 +523,7 @@ fn video_downloader(infrastructure: &InfrastructureContainer) -> VideoDownloader
         infrastructure.video_metadata_repository.clone(),
         infrastructure.event_publisher.clone(),
         infrastructure.clock.clone(),
+        layout,
     )
 }
 
@@ -512,6 +536,7 @@ fn metadata_generator(infrastructure: &InfrastructureContainer) -> Arc<MetadataG
 
 fn internal_video_reconciler(
     infrastructure: &InfrastructureContainer,
+    layout: LibraryLayout,
 ) -> Arc<InternalVideoReconciler> {
     Arc::new(InternalVideoReconciler::new(
         infrastructure.video_repository.clone(),
@@ -519,19 +544,56 @@ fn internal_video_reconciler(
         infrastructure.video_metadata_repository.clone(),
         infrastructure.task_repository.clone(),
         infrastructure.video_file_repository.clone(),
-        thumbnail_fetcher(infrastructure),
+        thumbnail_fetcher(infrastructure, layout),
         infrastructure.clock.clone(),
         videos_path(),
     ))
 }
 
-fn thumbnail_fetcher(infrastructure: &InfrastructureContainer) -> Arc<ThumbnailFetcher> {
+fn thumbnail_fetcher(
+    infrastructure: &InfrastructureContainer,
+    layout: LibraryLayout,
+) -> Arc<ThumbnailFetcher> {
     Arc::new(ThumbnailFetcher::new(
         infrastructure.video_repository.clone(),
         infrastructure.video_downloader_repository.clone(),
         infrastructure.task_repository.clone(),
         infrastructure.clock.clone(),
+        metadata_generator(infrastructure),
+        infrastructure.playlist_video_repository.clone(),
+        layout,
     ))
+}
+
+fn show_metadata_writer(layout: LibraryLayout) -> Arc<ShowMetadataWriter> {
+    Arc::new(ShowMetadataWriter::new(
+        layout,
+        Arc::new(FilesystemShowMetadataRepository::new(avatars_path())),
+        videos_path(),
+    ))
+}
+
+/// `YARRTUBE_LIBRARY_LAYOUT`: `movie` (the default) or `tv`. An invalid
+/// value stops the daemon at startup.
+fn library_layout() -> Result<LibraryLayout> {
+    Ok(LibraryLayout::parse(
+        std::env::var("YARRTUBE_LIBRARY_LAYOUT").ok().as_deref(),
+    )?)
+}
+
+/// Plex collections match movie items, so they are only reconciled in the
+/// movie layout, and only when the Plex integration is configured.
+fn schedules_plex_collections(layout: LibraryLayout, plex: Option<&PlexIntegration>) -> bool {
+    match (layout, plex) {
+        (LibraryLayout::Movie, Some(_)) => true,
+        (LibraryLayout::Tv, Some(_)) => {
+            warn!(
+                "Plex collections are not supported in the tv library layout, not reconciling them"
+            );
+            false
+        }
+        (_, None) => false,
+    }
 }
 
 async fn status() -> StatusCode {
@@ -584,15 +646,18 @@ async fn serve_http(port: u16, api_services: ApiServices) -> Result<()> {
 
 async fn run_async(
     infrastructure: InfrastructureContainer,
+    layout: LibraryLayout,
     task_executor: Arc<TaskExecutor>,
     plex: Option<PlexIntegration>,
 ) -> ExitCode {
     tokio::spawn(heartbeat_loop());
-    tokio::spawn(Arc::new(event_consumer(&infrastructure, plex)).run(BACKGROUND_POLL_INTERVAL));
+    tokio::spawn(
+        Arc::new(event_consumer(&infrastructure, layout, plex)).run(BACKGROUND_POLL_INTERVAL),
+    );
     tokio::spawn(task_executor.run(BACKGROUND_POLL_INTERVAL));
 
     tokio::select! {
-        result = serve_http(port(), api_services(&infrastructure)) => {
+        result = serve_http(port(), api_services(&infrastructure, layout)) => {
             if let Err(e) = result {
                 error!(error = %e, "HTTP server failed");
                 return ExitCode::FAILURE;
@@ -655,9 +720,17 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let layout = match library_layout() {
+        Ok(layout) => layout,
+        Err(e) => {
+            error!(error = %e, "invalid library layout");
+            return ExitCode::FAILURE;
+        }
+    };
     let plex = plex_integration();
-    let task_executor = Arc::new(task_executor(&infrastructure, plex.clone()));
-    if let Err(e) = prepare_task_queue(&infrastructure, &task_executor, plex.is_some()) {
+    let task_executor = Arc::new(task_executor(&infrastructure, layout, plex.clone()));
+    let plex_collections_enabled = schedules_plex_collections(layout, plex.as_ref());
+    if let Err(e) = prepare_task_queue(&infrastructure, &task_executor, plex_collections_enabled) {
         error!(error = %e, "failed to prepare the task queue");
         return ExitCode::FAILURE;
     }
@@ -673,7 +746,7 @@ pub fn run() -> ExitCode {
         }
     };
 
-    let exit_code = runtime.block_on(run_async(infrastructure, task_executor, plex));
+    let exit_code = runtime.block_on(run_async(infrastructure, layout, task_executor, plex));
     // Don't wait on blocking work such as a download in progress: a task
     // left running is recovered and retried on the next start.
     runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
@@ -683,6 +756,7 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::tasks::log_capture::captured_log_messages;
     use crate::infrastructure::shared::sqlite_connection::TestDatabase;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
@@ -909,7 +983,7 @@ mod tests {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
 
-        let handlers = task_handlers(&infrastructure, None);
+        let handlers = task_handlers(&infrastructure, LibraryLayout::Movie, None);
 
         assert_eq!(
             handlers.keys().map(String::as_str).collect::<BTreeSet<_>>(),
@@ -931,7 +1005,7 @@ mod tests {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
 
-        let subscribers = event_subscribers(&infrastructure, None);
+        let subscribers = event_subscribers(&infrastructure, LibraryLayout::Movie, None);
 
         assert_eq!(
             subscribers
@@ -956,7 +1030,11 @@ mod tests {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
 
-        let subscribers = event_subscribers(&infrastructure, Some(test_plex(Some("/plex/videos"))));
+        let subscribers = event_subscribers(
+            &infrastructure,
+            LibraryLayout::Movie,
+            Some(test_plex(Some("/plex/videos"))),
+        );
 
         assert_eq!(
             subscribers
@@ -982,7 +1060,8 @@ mod tests {
         let db = TestDatabase::new();
         let infrastructure = test_infrastructure(&db);
 
-        let subscribers = event_subscribers(&infrastructure, Some(test_plex(None)));
+        let subscribers =
+            event_subscribers(&infrastructure, LibraryLayout::Movie, Some(test_plex(None)));
 
         assert_eq!(subscribers.get("video_downloaded").map(Vec::len), None);
     }
@@ -1072,6 +1151,41 @@ mod tests {
         assert!(!videos_root.join("playlists").exists());
         assert!(!videos_root.join("channels").exists());
         std::fs::remove_dir_all(videos_root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn it_should_not_schedule_plex_collections_in_tv_layout() {
+        let mut scheduled = None;
+
+        let messages = captured_log_messages(|| {
+            scheduled = Some(schedules_plex_collections(
+                LibraryLayout::Tv,
+                Some(&test_plex(Some("/plex/videos"))),
+            ));
+        });
+
+        assert_eq!(
+            (scheduled, messages),
+            (
+                Some(false),
+                vec![
+                    "Plex collections are not supported in the tv library layout, not reconciling them"
+                        .to_string()
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn it_should_schedule_plex_collections_in_movie_layout_when_configured() {
+        assert_eq!(
+            [
+                schedules_plex_collections(LibraryLayout::Movie, Some(&test_plex(None))),
+                schedules_plex_collections(LibraryLayout::Movie, None),
+                schedules_plex_collections(LibraryLayout::Tv, None),
+            ],
+            [true, false, false]
+        );
     }
 
     /// Production adapters over a fresh test database, as `run` builds them.

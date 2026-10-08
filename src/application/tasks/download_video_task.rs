@@ -37,17 +37,24 @@ mod tests {
     use super::*;
     use crate::application::tasks::log_capture::captured_log_messages;
     use crate::domain::event::{DomainEvent, ScheduledEvent};
+    use crate::domain::playlist::PlaylistId;
+    use crate::domain::playlist_video::PlaylistVideo;
     use crate::domain::services::MetadataGenerator;
+    use crate::domain::shared::LibraryLayout;
     use crate::domain::video::Video;
     use crate::domain::video::VideoDownloaded;
     use crate::domain::video::{VideoId, VideoStatus};
+    use crate::domain::video_metadata::nfo_file::MOVIE_NFO_FILENAME;
+    use crate::domain::video_metadata::{EpisodeNumber, NfoFile};
     use crate::domain::video_metadata::{VideoMetadata, render_movie_nfo};
     use crate::infrastructure::repositories::filesystem_video_file_repository::{
         FakeVideoFileRepository, FilesystemVideoFileRepository, VideoFileRepository,
     };
-    use crate::infrastructure::repositories::sqlite_playlist_video_repository::SqlitePlaylistVideoRepository;
+    use crate::infrastructure::repositories::sqlite_playlist_video_repository::{
+        PlaylistVideoRepository, SqlitePlaylistVideoRepository,
+    };
     use crate::infrastructure::repositories::sqlite_video_metadata_repository::{
-        MOVIE_NFO_FILENAME, SqliteVideoMetadataRepository, VideoMetadataRepository,
+        SqliteVideoMetadataRepository, VideoMetadataRepository,
     };
     use crate::infrastructure::repositories::sqlite_video_repository::{
         SqliteVideoRepository, VideoRepository,
@@ -80,6 +87,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -111,6 +119,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -142,6 +151,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -173,6 +183,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(false)),
@@ -205,6 +216,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::with_failed_stderr(
@@ -235,6 +247,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with_sabr(
@@ -267,6 +280,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::with_failed_stderr_and_sabr(
@@ -298,6 +312,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::succeeding_with_sabr(
@@ -326,6 +341,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::with_failed_stderr_and_sabr(
@@ -355,6 +371,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -381,6 +398,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(false)),
@@ -413,6 +431,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(
@@ -446,6 +465,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(
@@ -479,6 +499,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(false).with_diagnosed_reason(
@@ -509,6 +530,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::with_failed_stderr(
@@ -539,6 +561,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(false).with_diagnose_error()),
@@ -569,6 +592,7 @@ mod tests {
         let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
         let downloader = Arc::new(FakeVideoDownloaderRepository::new(true));
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             downloader.clone(),
@@ -598,6 +622,7 @@ mod tests {
         video_repository.save(&video).unwrap();
         let downloader = Arc::new(FakeVideoDownloaderRepository::new(true));
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             downloader.clone(),
@@ -621,6 +646,7 @@ mod tests {
         video_repository.save(&video).unwrap();
         let downloader = Arc::new(FakeVideoDownloaderRepository::new(true));
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             downloader.clone(),
@@ -644,6 +670,7 @@ mod tests {
         video_repository.save(&video).unwrap();
         let downloader = Arc::new(FakeVideoDownloaderRepository::new(true));
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             downloader.clone(),
@@ -670,6 +697,7 @@ mod tests {
         let deleting_repository = video_repository.clone();
         let deleted_id = video.id.clone();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(
@@ -704,6 +732,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(false)),
@@ -735,6 +764,7 @@ mod tests {
         let video = my_video().with_thumbnail("My Video/My Video.jpg", fixed_timestamp());
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(false)),
@@ -764,6 +794,7 @@ mod tests {
         video_repository.save(&video).unwrap();
         let downloader = Arc::new(FakeVideoDownloaderRepository::new(true));
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             downloader.clone(),
@@ -793,6 +824,7 @@ mod tests {
         video_repository.save(&video).unwrap();
         let downloader = Arc::new(FakeVideoDownloaderRepository::new(true));
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             downloader.clone(),
@@ -832,6 +864,7 @@ mod tests {
         video_repository.save(&video).unwrap();
         let downloader = Arc::new(FakeVideoDownloaderRepository::new(true));
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             downloader.clone(),
@@ -861,6 +894,7 @@ mod tests {
         video_repository.save(&video).unwrap();
         let downloader = Arc::new(FakeVideoDownloaderRepository::new(true));
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             downloader.clone(),
@@ -906,6 +940,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -938,6 +973,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -968,6 +1004,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::with_duration(223)),
@@ -998,6 +1035,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -1031,6 +1069,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -1080,26 +1119,24 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let earlier = DateTime::<Utc>::from_timestamp(1_600_000_000, 0).unwrap();
+        let stale = VideoMetadata::new(
+            "Stale Title",
+            "Stale plot",
+            "Stale Channel",
+            "Stale Channel",
+            earlier,
+            None,
+            Vec::new(),
+            "yt1",
+            None,
+            "20200913 Stale Title",
+            earlier,
+        );
         video_metadata_repository
-            .save(
-                &video.id,
-                &VideoMetadata::new(
-                    "Stale Title",
-                    "Stale plot",
-                    "Stale Channel",
-                    "Stale Channel",
-                    earlier,
-                    None,
-                    Vec::new(),
-                    "yt1",
-                    None,
-                    "20200913 Stale Title",
-                    earlier,
-                ),
-                &video_dir,
-            )
+            .save(&video.id, &stale, &NfoFile::movie(&stale), &video_dir)
             .unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -1151,6 +1188,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -1214,6 +1252,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -1260,6 +1299,7 @@ mod tests {
         let observed = nfo_while_downloading.clone();
         let observed_dir = video_dir.clone();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(
@@ -1296,6 +1336,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -1326,6 +1367,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(true)),
@@ -1358,6 +1400,7 @@ mod tests {
         let video = my_video().with_thumbnail("My Video/My Video.jpg", fixed_timestamp());
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::new(false)),
@@ -1389,6 +1432,7 @@ mod tests {
         let video = my_video();
         video_repository.save(&video).unwrap();
         let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Movie,
             &db,
             video_repository.clone(),
             Arc::new(YtDlpVideoDownloaderRepository::new(
@@ -1422,10 +1466,358 @@ mod tests {
         std::fs::remove_dir_all(&output_dir).unwrap();
     }
 
+    #[test]
+    fn it_should_download_a_channel_video_into_its_season_folder_in_tv_layout() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let downloader = Arc::new(FakeVideoDownloaderRepository::echoing());
+        let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Tv,
+            &db,
+            video_repository.clone(),
+            downloader.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository {
+                metadata: Some(tv_youtube_metadata()),
+            }),
+            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+        ));
+
+        let result = run(&task, &payload_for(video.id.as_str()), false);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*downloader.prepare_folder_calls.lock().unwrap(), vec![]);
+        assert_eq!(
+            *downloader.prepare_episode_calls.lock().unwrap(),
+            vec![(
+                PathBuf::from("/videos/my-playlist/Season 2026"),
+                "S2026E01021530 - My Video".to_string(),
+                "yt1".to_string(),
+            )]
+        );
+        assert_eq!(
+            *downloader.calls.lock().unwrap(),
+            vec![download_call(
+                "S2026E01021530 - My Video",
+                "/videos/my-playlist",
+                Some("Season 2026")
+            )]
+        );
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![video.start_download(fixed_timestamp()).mark_downloaded(
+                Quality::High,
+                "Season 2026/S2026E01021530 - My Video.mp4",
+                None,
+                None,
+                fixed_timestamp(),
+            )]
+        );
+    }
+
+    #[test]
+    fn it_should_name_a_playlist_video_by_its_position_in_tv_layout() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let playlist_video_repository = SqlitePlaylistVideoRepository::new(db.database());
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        playlist_video_repository
+            .save(&PlaylistVideo::create(
+                PlaylistId::new("PL1").unwrap(),
+                video.id.clone(),
+                3,
+                fixed_timestamp(),
+            ))
+            .unwrap();
+        let downloader = Arc::new(FakeVideoDownloaderRepository::echoing());
+        let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Tv,
+            &db,
+            video_repository.clone(),
+            downloader.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository {
+                metadata: Some(tv_youtube_metadata()),
+            }),
+            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+        ));
+
+        let result = run(&task, &payload_for(video.id.as_str()), false);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *downloader.calls.lock().unwrap(),
+            vec![download_call(
+                "S01E03 - My Video",
+                "/videos/my-playlist",
+                Some("Season 01")
+            )]
+        );
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![video.start_download(fixed_timestamp()).mark_downloaded(
+                Quality::High,
+                "Season 01/S01E03 - My Video.mp4",
+                None,
+                None,
+                fixed_timestamp(),
+            )]
+        );
+    }
+
+    #[test]
+    fn it_should_reuse_the_season_folder_and_name_of_a_prefetched_thumbnail_in_tv_layout() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let video = my_video().with_thumbnail(
+            "Season 2026/S2026E01021530 - My Video [yt1].jpg",
+            fixed_timestamp(),
+        );
+        video_repository.save(&video).unwrap();
+        let downloader = Arc::new(FakeVideoDownloaderRepository::echoing());
+        let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Tv,
+            &db,
+            video_repository.clone(),
+            downloader.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository {
+                metadata: Some(tv_youtube_metadata()),
+            }),
+            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+        ));
+
+        let result = run(&task, &payload_for(video.id.as_str()), false);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*downloader.prepare_folder_calls.lock().unwrap(), vec![]);
+        assert_eq!(*downloader.prepare_episode_calls.lock().unwrap(), vec![]);
+        assert_eq!(
+            *downloader.calls.lock().unwrap(),
+            vec![download_call(
+                "S2026E01021530 - My Video [yt1]",
+                "/videos/my-playlist",
+                Some("Season 2026")
+            )]
+        );
+    }
+
+    #[test]
+    fn it_should_write_the_episode_nfo_before_the_video_lands_in_tv_layout() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let output_dir = tempfile::tempdir().unwrap();
+        let video_dir = output_dir.path().join(TV_SEASON_FOLDER);
+        std::fs::create_dir_all(&video_dir).unwrap();
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let files_while_downloading = Arc::new(std::sync::Mutex::new(None));
+        let observed = files_while_downloading.clone();
+        let observed_dir = video_dir.clone();
+        let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Tv,
+            &db,
+            video_repository.clone(),
+            Arc::new(
+                FakeVideoDownloaderRepository::echoing().with_on_download(move || {
+                    *observed.lock().unwrap() = Some((
+                        folder_entries(&observed_dir),
+                        std::fs::read_to_string(observed_dir.join("S2026E01021530 - My Video.nfo"))
+                            .ok(),
+                    ));
+                }),
+            ),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository {
+                metadata: Some(tv_youtube_metadata()),
+            }),
+            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+        ));
+
+        let result = run(&task, &output_dir_payload(&video, output_dir.path()), false);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *files_while_downloading.lock().unwrap(),
+            Some((
+                vec!["S2026E01021530 - My Video.nfo".to_string()],
+                Some(tv_episode_nfo(Some("S2026E01021530 - My Video.jpg")).content)
+            ))
+        );
+    }
+
+    #[test]
+    fn it_should_record_the_episode_nfo_after_a_tv_layout_download() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let video_metadata_repository = Arc::new(SqliteVideoMetadataRepository::new(db.database()));
+        let output_dir = tempfile::tempdir().unwrap();
+        let video_dir = output_dir.path().join(TV_SEASON_FOLDER);
+        std::fs::create_dir_all(&video_dir).unwrap();
+        std::fs::write(video_dir.join("S2026E01021530 - My Video.jpg"), "jpg").unwrap();
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Tv,
+            &db,
+            video_repository.clone(),
+            Arc::new(FakeVideoDownloaderRepository::echoing()),
+            Arc::new(FilesystemVideoFileRepository),
+            Arc::new(FakeYoutubeMetadataRepository {
+                metadata: Some(tv_youtube_metadata()),
+            }),
+            video_metadata_repository.clone(),
+        ));
+
+        let result = run(&task, &output_dir_payload(&video, output_dir.path()), false);
+
+        assert_eq!(result, Ok(()));
+        let mut files = folder_entries(&video_dir);
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                "S2026E01021530 - My Video.jpg".to_string(),
+                "S2026E01021530 - My Video.nfo".to_string()
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(video_dir.join("S2026E01021530 - My Video.nfo")).unwrap(),
+            tv_episode_nfo(Some("S2026E01021530 - My Video.jpg")).content
+        );
+        assert_eq!(
+            video_metadata_repository.find(&video.id).unwrap(),
+            Some(VideoMetadata {
+                published_at: tv_youtube_metadata().published_at,
+                sorttitle: "20260102 My Video".to_string(),
+                ..generated_metadata(Some("S2026E01021530 - My Video.jpg"))
+            })
+        );
+    }
+
+    #[test]
+    fn it_should_remove_the_episode_files_if_a_tv_layout_download_fails() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let video_metadata_repository = Arc::new(SqliteVideoMetadataRepository::new(db.database()));
+        let output_dir = tempfile::tempdir().unwrap();
+        let season_dir = output_dir.path().join(TV_SEASON_FOLDER);
+        std::fs::create_dir_all(&season_dir).unwrap();
+        std::fs::write(season_dir.join("S2026E01011200 - Other.mp4"), "mp4").unwrap();
+        // Left behind by the failed yt-dlp run.
+        std::fs::write(season_dir.join("S2026E01021530 - My Video.jpg"), "jpg").unwrap();
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Tv,
+            &db,
+            video_repository.clone(),
+            Arc::new(FakeVideoDownloaderRepository::echoing_failure()),
+            Arc::new(FilesystemVideoFileRepository),
+            Arc::new(FakeYoutubeMetadataRepository {
+                metadata: Some(tv_youtube_metadata()),
+            }),
+            video_metadata_repository.clone(),
+        ));
+
+        let result = run(&task, &output_dir_payload(&video, output_dir.path()), false);
+
+        assert_eq!(
+            result,
+            Err(format!("yt-dlp failed to download video {}", video.id))
+        );
+        assert_eq!(
+            folder_entries(&season_dir),
+            vec!["S2026E01011200 - Other.mp4".to_string()]
+        );
+        assert_eq!(video_metadata_repository.find(&video.id).unwrap(), None);
+    }
+
+    #[test]
+    fn it_should_remove_only_the_episode_files_if_the_video_is_deleted_during_a_tv_layout_download()
+    {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let output_dir = tempfile::tempdir().unwrap();
+        let season_dir = output_dir.path().join(TV_SEASON_FOLDER);
+        std::fs::create_dir_all(&season_dir).unwrap();
+        std::fs::write(season_dir.join("S2026E01011200 - Other.mp4"), "mp4").unwrap();
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let deleting_repository = video_repository.clone();
+        let deleted_id = video.id.clone();
+        let downloading_dir = season_dir.clone();
+        let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Tv,
+            &db,
+            video_repository.clone(),
+            Arc::new(
+                FakeVideoDownloaderRepository::echoing().with_on_download(move || {
+                    std::fs::write(downloading_dir.join("S2026E01021530 - My Video.mp4"), "mp4")
+                        .unwrap();
+                    deleting_repository.delete(&deleted_id).unwrap();
+                }),
+            ),
+            Arc::new(FilesystemVideoFileRepository),
+            Arc::new(FakeYoutubeMetadataRepository {
+                metadata: Some(tv_youtube_metadata()),
+            }),
+            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+        ));
+
+        let result = run(&task, &output_dir_payload(&video, output_dir.path()), false);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(video_repository.list().unwrap(), vec![]);
+        assert_eq!(
+            folder_entries(&season_dir),
+            vec!["S2026E01011200 - Other.mp4".to_string()]
+        );
+    }
+
+    #[test]
+    fn it_should_fail_retryably_without_metadata_in_tv_layout() {
+        let db = TestDatabase::new();
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let video = my_video();
+        video_repository.save(&video).unwrap();
+        let downloader = Arc::new(FakeVideoDownloaderRepository::echoing());
+        let task = DownloadVideoTask::new(video_downloader(
+            LibraryLayout::Tv,
+            &db,
+            video_repository.clone(),
+            downloader.clone(),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(FakeYoutubeMetadataRepository::default()),
+            Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+        ));
+
+        let result = run(&task, &payload_for(video.id.as_str()), false);
+
+        assert_eq!(
+            result,
+            Err("YouTube metadata unavailable, needed to name the episode".to_string())
+        );
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![
+                video
+                    .start_download(fixed_timestamp())
+                    .mark_errored_retrying(fixed_timestamp())
+            ]
+        );
+        assert_eq!(*downloader.prepare_folder_calls.lock().unwrap(), vec![]);
+        assert_eq!(*downloader.calls.lock().unwrap(), vec![]);
+    }
+
     /// Builds a downloader around the ports a test seeds, configures or
     /// asserts; the playlist membership lookup (only used to pick a metadata
     /// sorttitle) and the clock are ones no test here varies.
     fn video_downloader(
+        layout: LibraryLayout,
         db: &TestDatabase,
         video_repository: Arc<SqliteVideoRepository>,
         video_downloader_repository: Arc<dyn VideoDownloaderRepository>,
@@ -1448,6 +1840,7 @@ mod tests {
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
+            layout,
         )
     }
 
@@ -1471,6 +1864,7 @@ mod tests {
                 Arc::new(FixedClock(fixed_timestamp())),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
+            LibraryLayout::Movie,
         ))
     }
 
@@ -1493,6 +1887,36 @@ mod tests {
             tags: Vec::new(),
             category_id: None,
         }
+    }
+
+    /// `youtube_metadata()` published at `2026-01-02T15:30:45Z`, so a channel
+    /// video is numbered `S2026E01021530`.
+    fn tv_youtube_metadata() -> YoutubeMetadata {
+        YoutubeMetadata {
+            published_at: DateTime::parse_from_rfc3339("2026-01-02T15:30:45Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ..youtube_metadata()
+        }
+    }
+
+    /// The season folder a TV-layout download of `my_video()` lands in,
+    /// relative to the output dir, given `tv_youtube_metadata()`.
+    const TV_SEASON_FOLDER: &str = "Season 2026";
+
+    /// The episode NFO a TV-layout download of `my_video()` writes from
+    /// `tv_youtube_metadata()`, referencing `thumb` when given.
+    fn tv_episode_nfo(thumb: Option<&str>) -> NfoFile {
+        let metadata = VideoMetadata {
+            published_at: tv_youtube_metadata().published_at,
+            sorttitle: "20260102 My Video".to_string(),
+            ..generated_metadata(thumb)
+        };
+        NfoFile::episode(
+            &metadata,
+            EpisodeNumber::for_channel_video(metadata.published_at),
+            "S2026E01021530 - My Video",
+        )
     }
 
     /// One call as `FakeVideoDownloaderRepository` records it, for the
@@ -1540,11 +1964,17 @@ mod tests {
         .to_string()
     }
 
+    /// The names in `dir`, sorted; empty when `dir` doesn't exist.
     fn folder_entries(dir: &std::path::Path) -> Vec<String> {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect()
+        let mut entries: Vec<String> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .collect()
+            })
+            .unwrap_or_default();
+        entries.sort();
+        entries
     }
 
     fn pending_event(id: i64, event: DomainEvent) -> ScheduledEvent {

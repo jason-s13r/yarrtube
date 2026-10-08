@@ -1,9 +1,14 @@
+use crate::domain::services::{MetadataGenerator, MetadataGeneratorApi};
+use crate::domain::shared::LibraryLayout;
 use crate::domain::task::Task;
 use crate::domain::video::Video;
 use crate::domain::video::VideoRecordId;
 use crate::domain::video::VideoStatus;
+use crate::domain::video::entry_location;
 use crate::domain::video::top_level_entry;
-use crate::domain::video::video_filename::VideoFilename;
+use crate::domain::video::video_filename::{VideoFilename, episode_folder_name};
+use crate::domain::video_metadata::EpisodeNumber;
+use crate::infrastructure::repositories::sqlite_playlist_video_repository::PlaylistVideoRepository;
 use crate::infrastructure::repositories::sqlite_task_repository::TaskRepository;
 use crate::infrastructure::repositories::sqlite_video_repository::VideoRepository;
 use crate::infrastructure::repositories::youtube_video_downloader_repository::{
@@ -25,20 +30,30 @@ pub struct ThumbnailFetcher {
     video_downloader_repository: Arc<dyn VideoDownloaderRepository>,
     task_repository: Arc<dyn TaskRepository>,
     clock: Arc<dyn Clock>,
+    metadata_generator: Arc<MetadataGenerator>,
+    playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
+    layout: LibraryLayout,
 }
 
 impl ThumbnailFetcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         video_repository: Arc<dyn VideoRepository>,
         video_downloader_repository: Arc<dyn VideoDownloaderRepository>,
         task_repository: Arc<dyn TaskRepository>,
         clock: Arc<dyn Clock>,
+        metadata_generator: Arc<MetadataGenerator>,
+        playlist_video_repository: Arc<dyn PlaylistVideoRepository>,
+        layout: LibraryLayout,
     ) -> Self {
         Self {
             video_repository,
             video_downloader_repository,
             task_repository,
             clock,
+            metadata_generator,
+            playlist_video_repository,
+            layout,
         }
     }
 }
@@ -109,8 +124,19 @@ impl ThumbnailFetcherApi for ThumbnailFetcher {
 }
 
 impl ThumbnailFetcher {
-    /// Reuses `video`'s already-recorded folder, if any.
     fn fetch_thumbnail(&self, video: &Video, output_dir: &Path) -> anyhow::Result<ThumbnailFetch> {
+        match self.layout {
+            LibraryLayout::Tv => self.fetch_episode_thumbnail(video, output_dir),
+            LibraryLayout::Movie => self.fetch_movie_thumbnail(video, output_dir),
+        }
+    }
+
+    /// Reuses `video`'s already-recorded folder, if any.
+    fn fetch_movie_thumbnail(
+        &self,
+        video: &Video,
+        output_dir: &Path,
+    ) -> anyhow::Result<ThumbnailFetch> {
         let existing_folder = video.filename.as_deref().map(top_level_entry);
         let filename = VideoFilename::from_title(&video.title);
         self.video_downloader_repository.fetch_thumbnail(
@@ -120,6 +146,79 @@ impl ThumbnailFetcher {
             output_dir,
             existing_folder,
         )
+    }
+
+    /// Saves the thumbnail under the episode name in the video's episode
+    /// folder: the one its files already live in, else a fresh one in its
+    /// season folder, numbered from its YouTube metadata, which the
+    /// download later reuses.
+    fn fetch_episode_thumbnail(
+        &self,
+        video: &Video,
+        output_dir: &Path,
+    ) -> anyhow::Result<ThumbnailFetch> {
+        let Some(entry) = self.episode_entry(video, output_dir)? else {
+            return Ok(ThumbnailFetch::Unavailable {
+                reason: Some(
+                    "YouTube metadata unavailable, needed to name the episode".to_string(),
+                ),
+            });
+        };
+        let (folder, basename) = entry_location(&entry);
+        self.video_downloader_repository.fetch_thumbnail(
+            &video.youtube_id.to_url(),
+            basename,
+            video.youtube_id.as_str(),
+            output_dir,
+            Some(folder),
+        )
+    }
+
+    /// The entry `video`'s files already live in, else a fresh one claimed
+    /// in its season folder; `None` (no folder created) when it can't be
+    /// numbered.
+    fn episode_entry(&self, video: &Video, output_dir: &Path) -> anyhow::Result<Option<String>> {
+        if let Some(folder) = video.recorded_video_entry() {
+            return Ok(Some(folder.to_string()));
+        }
+        self.episode_number(video)
+            .map(|episode| self.prepare_episode_folder(video, output_dir, episode))
+            .transpose()
+    }
+
+    /// From the video's YouTube metadata (its publish time) and playlist
+    /// position; `None` when the metadata can't be fetched.
+    fn episode_number(&self, video: &Video) -> Option<EpisodeNumber> {
+        let sort_position = self.playlist_position(video);
+        self.metadata_generator
+            .generate(video, sort_position, None)
+            .map(|metadata| EpisodeNumber::resolve(metadata.published_at, sort_position))
+    }
+
+    fn playlist_position(&self, video: &Video) -> Option<i64> {
+        match self.playlist_video_repository.find_by_video(&video.id) {
+            Ok(playlist_video) => playlist_video.map(|pv| pv.position),
+            Err(e) => {
+                warn!(video_id = %video.id, error = %e, "failed to look up playlist position, numbering by publish time");
+                None
+            }
+        }
+    }
+
+    fn prepare_episode_folder(
+        &self,
+        video: &Video,
+        output_dir: &Path,
+        episode: EpisodeNumber,
+    ) -> anyhow::Result<String> {
+        let name = episode_folder_name(episode, &video.title);
+        let season_dir = episode.season_dir();
+        let basename = self.video_downloader_repository.prepare_episode(
+            &output_dir.join(&season_dir),
+            name.as_str(),
+            video.youtube_id.as_str(),
+        )?;
+        Ok(format!("{season_dir}/{basename}"))
     }
 
     fn schedule_fetch(&self, video: &Video, output_dir: &Path) -> anyhow::Result<()> {

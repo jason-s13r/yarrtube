@@ -1,5 +1,7 @@
 use crate::domain::video::VideoRecordId;
-use crate::domain::video_metadata::{VideoMetadata, render_movie_nfo};
+use crate::domain::video_metadata::{NfoFile, VideoMetadata};
+#[cfg(test)]
+use crate::domain::video_metadata::{nfo_file::MOVIE_NFO_FILENAME, render_movie_nfo};
 use crate::infrastructure::shared::sqlite_connection::Database;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -8,9 +10,8 @@ use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Row, params};
 use std::path::Path;
 
-pub const MOVIE_NFO_FILENAME: &str = "movie.nfo";
-
-/// Persists a video's generated metadata: writing `movie.nfo` into its
+/// Persists a video's generated metadata: writing its sidecar `NfoFile`
+/// (`movie.nfo` or an episode NFO) into its
 /// output folder first, and only recording a `video_metadata` row once that
 /// write succeeds. The row is the sole source of truth for "has this
 /// video's metadata been generated" — `find` never inspects the filesystem,
@@ -23,14 +24,15 @@ pub trait VideoMetadataRepository: Send + Sync {
         &self,
         video_id: &VideoRecordId,
         metadata: &VideoMetadata,
+        nfo: &NfoFile,
         video_dir: &Path,
     ) -> anyhow::Result<()>;
     fn find(&self, video_id: &VideoRecordId) -> anyhow::Result<Option<VideoMetadata>>;
-    /// Writes only `movie.nfo` into `video_dir`, recording nothing, so it can
-    /// be in place before the video's media file lands there.
-    fn write_nfo(&self, metadata: &VideoMetadata, video_dir: &Path) -> anyhow::Result<()>;
-    /// Removes `video_dir`'s `movie.nfo`; a missing file is not an error.
-    fn remove_nfo(&self, video_dir: &Path) -> anyhow::Result<()>;
+    /// Writes only `nfo` into `video_dir`, recording nothing, so it can be
+    /// in place before the video's media file lands there.
+    fn write_nfo(&self, nfo: &NfoFile, video_dir: &Path) -> anyhow::Result<()>;
+    /// Removes `video_dir`'s `nfo_filename`; a missing file is not an error.
+    fn remove_nfo(&self, nfo_filename: &str, video_dir: &Path) -> anyhow::Result<()>;
 }
 
 /// A `video_metadata` row as read, before its values are parsed into a
@@ -59,11 +61,9 @@ impl SqliteVideoMetadataRepository {
         Self { db }
     }
 
-    fn write_movie_nfo(metadata: &VideoMetadata, video_dir: &Path) -> anyhow::Result<()> {
-        let content = render_movie_nfo(metadata);
-        std::fs::write(video_dir.join(MOVIE_NFO_FILENAME), content).map_err(|e| {
-            anyhow::anyhow!("failed to write {MOVIE_NFO_FILENAME} in {video_dir:?}: {e}")
-        })
+    fn write_nfo_file(nfo: &NfoFile, video_dir: &Path) -> anyhow::Result<()> {
+        std::fs::write(video_dir.join(&nfo.filename), &nfo.content)
+            .map_err(|e| anyhow::anyhow!("failed to write {} in {video_dir:?}: {e}", nfo.filename))
     }
 }
 
@@ -72,9 +72,10 @@ impl VideoMetadataRepository for SqliteVideoMetadataRepository {
         &self,
         video_id: &VideoRecordId,
         metadata: &VideoMetadata,
+        nfo: &NfoFile,
         video_dir: &Path,
     ) -> anyhow::Result<()> {
-        Self::write_movie_nfo(metadata, video_dir)?;
+        Self::write_nfo_file(nfo, video_dir)?;
 
         let conn = self.db.write()?;
         let tags = serde_json::to_string(&metadata.tags)
@@ -132,16 +133,16 @@ impl VideoMetadataRepository for SqliteVideoMetadataRepository {
         .transpose()
     }
 
-    fn write_nfo(&self, metadata: &VideoMetadata, video_dir: &Path) -> anyhow::Result<()> {
-        Self::write_movie_nfo(metadata, video_dir)
+    fn write_nfo(&self, nfo: &NfoFile, video_dir: &Path) -> anyhow::Result<()> {
+        Self::write_nfo_file(nfo, video_dir)
     }
 
-    fn remove_nfo(&self, video_dir: &Path) -> anyhow::Result<()> {
-        match std::fs::remove_file(video_dir.join(MOVIE_NFO_FILENAME)) {
+    fn remove_nfo(&self, nfo_filename: &str, video_dir: &Path) -> anyhow::Result<()> {
+        match std::fs::remove_file(video_dir.join(nfo_filename)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(anyhow::anyhow!(
-                "failed to remove {MOVIE_NFO_FILENAME} in {video_dir:?}: {e}"
+                "failed to remove {nfo_filename} in {video_dir:?}: {e}"
             )),
         }
     }
@@ -233,17 +234,29 @@ mod tests {
     }
 
     #[test]
-    fn it_should_write_movie_nfo_and_record_a_row_on_save() {
+    fn it_should_write_the_given_nfo_file_on_save() {
         let repo = repo();
         let video_dir = unique_temp_dir("video-metadata-save");
         let video_id = VideoRecordId::new_generated();
+        let nfo = NfoFile {
+            filename: "S01E03 - Intro.nfo".to_string(),
+            content: "<episodedetails/>".to_string(),
+        };
 
-        repo.save(&video_id, &metadata(), &video_dir).unwrap();
+        repo.save(&video_id, &metadata(), &nfo, &video_dir).unwrap();
 
-        assert!(video_dir.join(MOVIE_NFO_FILENAME).is_file());
-        let found = repo.find(&video_id).unwrap().unwrap();
-        assert_eq!(found.title, "My Video");
-        assert_eq!(found.tags, vec!["tag1".to_string(), "tag2".to_string()]);
+        assert_eq!(
+            std::fs::read_dir(&video_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["S01E03 - Intro.nfo".to_string()]
+        );
+        assert_eq!(
+            std::fs::read_to_string(video_dir.join("S01E03 - Intro.nfo")).unwrap(),
+            "<episodedetails/>"
+        );
+        assert_eq!(repo.find(&video_id).unwrap(), Some(metadata()));
         std::fs::remove_dir_all(&video_dir).unwrap();
     }
 
@@ -253,7 +266,12 @@ mod tests {
         let missing_dir = unique_temp_dir("video-metadata-missing-parent").join("does-not-exist");
         let video_id = VideoRecordId::new_generated();
 
-        let result = repo.save(&video_id, &metadata(), &missing_dir);
+        let result = repo.save(
+            &video_id,
+            &metadata(),
+            &NfoFile::movie(&metadata()),
+            &missing_dir,
+        );
 
         assert!(result.is_err());
         assert!(repo.find(&video_id).unwrap().is_none());
@@ -277,13 +295,20 @@ mod tests {
         let repo = repo();
         let video_dir = unique_temp_dir("video-metadata-overwrite");
         let video_id = VideoRecordId::new_generated();
-        repo.save(&video_id, &metadata(), &video_dir).unwrap();
+        repo.save(
+            &video_id,
+            &metadata(),
+            &NfoFile::movie(&metadata()),
+            &video_dir,
+        )
+        .unwrap();
 
         let updated = VideoMetadata {
             title: "Renamed".to_string(),
             ..metadata()
         };
-        repo.save(&video_id, &updated, &video_dir).unwrap();
+        repo.save(&video_id, &updated, &NfoFile::movie(&updated), &video_dir)
+            .unwrap();
 
         let found = repo.find(&video_id).unwrap().unwrap();
         assert_eq!(found.title, "Renamed");
@@ -302,7 +327,8 @@ mod tests {
             ..metadata()
         };
 
-        repo.save(&video_id, &minimal, &video_dir).unwrap();
+        repo.save(&video_id, &minimal, &NfoFile::movie(&minimal), &video_dir)
+            .unwrap();
 
         let found = repo.find(&video_id).unwrap().unwrap();
         assert_eq!(found.genre, None);
@@ -316,7 +342,8 @@ mod tests {
         let repo = repo();
         let video_dir = unique_temp_dir("video-metadata-write-nfo");
 
-        repo.write_nfo(&metadata(), &video_dir).unwrap();
+        repo.write_nfo(&NfoFile::movie(&metadata()), &video_dir)
+            .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(video_dir.join(MOVIE_NFO_FILENAME)).unwrap(),
@@ -333,7 +360,7 @@ mod tests {
         std::fs::write(video_dir.join(MOVIE_NFO_FILENAME), "<movie></movie>").unwrap();
         std::fs::write(video_dir.join("My Video.jpg"), "jpg").unwrap();
 
-        repo.remove_nfo(&video_dir).unwrap();
+        repo.remove_nfo(MOVIE_NFO_FILENAME, &video_dir).unwrap();
 
         assert_eq!(
             std::fs::read_dir(&video_dir)
@@ -346,11 +373,30 @@ mod tests {
     }
 
     #[test]
+    fn it_should_remove_only_the_named_nfo_file() {
+        let repo = repo();
+        let video_dir = unique_temp_dir("video-metadata-remove-named-nfo");
+        std::fs::write(video_dir.join(MOVIE_NFO_FILENAME), "<movie></movie>").unwrap();
+        std::fs::write(video_dir.join("S01E03 - Intro.nfo"), "<episodedetails/>").unwrap();
+
+        repo.remove_nfo("S01E03 - Intro.nfo", &video_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_dir(&video_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>(),
+            vec![MOVIE_NFO_FILENAME.to_string()]
+        );
+        std::fs::remove_dir_all(&video_dir).unwrap();
+    }
+
+    #[test]
     fn it_should_ignore_removing_a_missing_movie_nfo() {
         let repo = repo();
         let video_dir = unique_temp_dir("video-metadata-remove-missing-nfo");
 
-        let result = repo.remove_nfo(&video_dir);
+        let result = repo.remove_nfo(MOVIE_NFO_FILENAME, &video_dir);
 
         assert!(result.is_ok());
         std::fs::remove_dir_all(&video_dir).unwrap();
@@ -375,7 +421,13 @@ mod tests {
             ..metadata()
         };
 
-        repo.save(&video_id, &metadata_for_id, &video_dir).unwrap();
+        repo.save(
+            &video_id,
+            &metadata_for_id,
+            &NfoFile::movie(&metadata_for_id),
+            &video_dir,
+        )
+        .unwrap();
 
         let found = repo.find(&video_id).unwrap().unwrap();
         assert_eq!(found.uniqueid, "yt-specific");

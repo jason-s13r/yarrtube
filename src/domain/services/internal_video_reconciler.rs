@@ -6,8 +6,10 @@ use crate::domain::shared::Quality;
 use crate::domain::task::{ScheduledTask, Task};
 use crate::domain::video::VideoRecordId;
 use crate::domain::video::{
-    Video, VideoStatus, resolve_output_dir, top_level_entry, video_dir_for_filename,
+    Video, VideoStatus, entry_owns, is_named_after, is_season_dir, resolve_output_dir,
+    strip_episode_prefix, video_dir_for_filename, video_entry,
 };
+use crate::domain::video_metadata::{NfoFile, TVSHOW_NFO_FILENAME};
 use crate::infrastructure::repositories::filesystem_video_file_repository::VideoFileRepository;
 use crate::infrastructure::repositories::sqlite_task_repository::TaskRepository;
 use crate::infrastructure::repositories::sqlite_video_metadata_repository::VideoMetadataRepository;
@@ -136,7 +138,7 @@ impl InternalVideoReconciler {
     ) -> anyhow::Result<ActualState> {
         let downloads_in_flight = self.video_ids_with_download_in_flight()?;
         let output_dir = resolve_output_dir(&self.videos_path, desired.path.as_str());
-        let files = self.video_file_repository.list(&output_dir)?;
+        let files = self.list_video_entries(&output_dir)?;
         let videos = self.video_repository.find_many(&desired.video_ids)?;
         let broken_download_ids = videos
             .iter()
@@ -145,7 +147,8 @@ impl InternalVideoReconciler {
             })
             .map(|v| v.id.clone())
             .collect();
-        let protected_entries = protected_entries(&videos, &delta.previous_titles);
+        let unrecorded_folders = unrecorded_folders(&videos, &delta.previous_titles);
+        let protected_entries = protected_entries(&videos, &unrecorded_folders);
 
         Ok(ActualState {
             output_dir,
@@ -154,7 +157,33 @@ impl InternalVideoReconciler {
             downloads_in_flight,
             broken_download_ids,
             protected_entries,
+            unrecorded_folders,
         })
+    }
+
+    /// The per-video entries of `output_dir` orphan cleanup may consider:
+    /// its top-level entries and, inside each season folder, its episode
+    /// folders as `"Season N/<entry>"`. A show's own files and season
+    /// folders themselves are never among them.
+    fn list_video_entries(&self, output_dir: &Path) -> anyhow::Result<Vec<String>> {
+        let top_level = self.video_file_repository.list(output_dir)?;
+        let episodes = top_level
+            .iter()
+            .filter(|entry| is_season_dir(entry))
+            .map(|season| {
+                Ok(self
+                    .video_file_repository
+                    .list(&output_dir.join(season))?
+                    .into_iter()
+                    .map(|entry| format!("{season}/{entry}"))
+                    .collect::<Vec<_>>())
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(top_level
+            .into_iter()
+            .filter(|entry| !is_show_entry(entry))
+            .chain(episodes.into_iter().flatten())
+            .collect())
     }
 
     fn video_ids_with_download_in_flight(&self) -> anyhow::Result<HashSet<String>> {
@@ -248,10 +277,11 @@ impl InternalVideoReconciler {
             return;
         };
         let video_dir = video_dir_for_filename(output_dir, filename);
+        let nfo = NfoFile::for_media_file(&video_metadata, filename);
 
-        if let Err(e) = self
-            .video_metadata_repository
-            .save(&video.id, &video_metadata, &video_dir)
+        if let Err(e) =
+            self.video_metadata_repository
+                .save(&video.id, &video_metadata, &nfo, &video_dir)
         {
             warn!(video_id = %video.id, error = %e, "failed to save video metadata during reconcile");
         }
@@ -313,7 +343,7 @@ impl InternalVideoReconciler {
     /// belong to a stored video.
     fn delete_orphaned_files(&self, actual: &ActualState) -> anyhow::Result<()> {
         for file in &actual.files {
-            if actual.protected_entries.contains(file) {
+            if actual.is_protected(file) {
                 continue;
             }
             if self
@@ -367,39 +397,74 @@ struct ActualState {
     downloads_in_flight: HashSet<String>,
     /// `Downloaded` videos whose file is missing or not mp4.
     broken_download_ids: HashSet<VideoRecordId>,
-    /// Top-level entries of `output_dir` that orphan cleanup must keep.
+    /// Per-video entries of `output_dir` that orphan cleanup must keep.
     protected_entries: HashSet<String>,
+    /// The folder names an in-flight download or thumbnail fetch may be
+    /// writing into, predicted from titles since they aren't recorded yet.
+    unrecorded_folders: HashSet<String>,
 }
 
 impl ActualState {
     fn is_broken(&self, video: &Video) -> bool {
         self.broken_download_ids.contains(&video.id)
     }
+
+    /// Whether orphan cleanup must keep `file`: one owned by a protected
+    /// entry, or an episode file inside a season folder whose title (after
+    /// its `S…E… - ` prefix) is named after an unrecorded folder (a
+    /// download or thumbnail fetch in flight).
+    fn is_protected(&self, file: &str) -> bool {
+        self.protected_entries
+            .iter()
+            .any(|entry| entry_owns(entry, file))
+            || file
+                .split_once('/')
+                .and_then(|(_, episode)| strip_episode_prefix(episode))
+                .is_some_and(|title| {
+                    self.unrecorded_folders
+                        .iter()
+                        .any(|folder| is_named_after(title, folder))
+                })
+    }
 }
 
-/// Top-level entries of the output folder orphan cleanup must keep: every
-/// `Downloaded` video's file, every stored video's thumbnail (a
-/// `Pending`/`InProgress` video may already have one pre-fetched, see the
-/// `video-thumbnails` capability), and the folder an in-flight download or
-/// thumbnail fetch is writing into — not recorded yet, so protected by its
-/// predicted name.
-fn protected_entries(
+/// A TV-layout show's own top-level entries, never orphans: `tvshow.nfo`,
+/// its `poster.*` and its season folders.
+fn is_show_entry(entry: &str) -> bool {
+    entry == TVSHOW_NFO_FILENAME || entry.starts_with("poster.") || is_season_dir(entry)
+}
+
+/// The folders an in-flight download or thumbnail fetch may be writing
+/// into: not recorded yet, so predicted from each video's title (and, just
+/// after a rename, its previous one).
+fn unrecorded_folders(
     videos: &[Video],
     previous_titles: &HashMap<VideoRecordId, String>,
 ) -> HashSet<String> {
+    videos
+        .iter()
+        .flat_map(|video| {
+            video.unrecorded_folder_candidates(previous_titles.get(&video.id).map(String::as_str))
+        })
+        .collect()
+}
+
+/// Per-video entries of the output folder orphan cleanup must keep: every
+/// `Downloaded` video's file, every stored video's thumbnail (a
+/// `Pending`/`InProgress` video may already have one pre-fetched, see the
+/// `video-thumbnails` capability), and the `unrecorded_folders`, protected
+/// by their predicted name.
+fn protected_entries(videos: &[Video], unrecorded_folders: &HashSet<String>) -> HashSet<String> {
     let downloaded_files = videos
         .iter()
         .filter(|v| v.status == VideoStatus::Downloaded)
         .filter_map(|v| v.filename.clone());
     let thumbnails = videos.iter().filter_map(|v| v.thumbnail_filename.clone());
-    let unrecorded_folders = videos.iter().flat_map(|video| {
-        video.unrecorded_folder_candidates(previous_titles.get(&video.id).map(String::as_str))
-    });
 
     downloaded_files
         .chain(thumbnails)
-        .chain(unrecorded_folders)
-        .map(|entry| top_level_entry(&entry).to_string())
+        .chain(unrecorded_folders.iter().cloned())
+        .map(|entry| video_entry(&entry).to_string())
         .collect()
 }
 
@@ -408,10 +473,12 @@ mod tests {
     use super::*;
     use crate::application::tasks::log_capture::captured_log_messages;
     use crate::domain::services::MetadataGenerator;
+    use crate::domain::shared::LibraryLayout;
     use crate::domain::task::TaskStatus;
     use crate::domain::video::VideoId;
     use crate::domain::video_metadata::VideoMetadata;
     use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
+    use crate::infrastructure::repositories::sqlite_playlist_video_repository::SqlitePlaylistVideoRepository;
     use crate::infrastructure::repositories::sqlite_task_repository::SqliteTaskRepository;
     use crate::infrastructure::repositories::sqlite_video_metadata_repository::SqliteVideoMetadataRepository;
     use crate::infrastructure::repositories::sqlite_video_repository::SqliteVideoRepository;
@@ -1270,6 +1337,12 @@ mod tests {
                 Arc::new(FakeVideoDownloaderRepository::default()),
                 task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             videos_root.path().to_string_lossy(),
@@ -1342,6 +1415,12 @@ mod tests {
                 Arc::new(FakeVideoDownloaderRepository::default()),
                 task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             videos_root.path().to_string_lossy(),
@@ -1418,7 +1497,12 @@ mod tests {
             DateTime::UNIX_EPOCH,
         );
         video_metadata_repository
-            .save(&video.id, &existing_metadata, &video_dir)
+            .save(
+                &video.id,
+                &existing_metadata,
+                &NfoFile::movie(&existing_metadata),
+                &video_dir,
+            )
             .unwrap();
         let reconciler = InternalVideoReconciler::new(
             video_repository.clone(),
@@ -1436,6 +1520,12 @@ mod tests {
                 Arc::new(FakeVideoDownloaderRepository::default()),
                 task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             videos_root.path().to_string_lossy(),
@@ -1496,6 +1586,12 @@ mod tests {
                 Arc::new(FakeVideoDownloaderRepository::default()),
                 task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             videos_root.path().to_string_lossy(),
@@ -1556,6 +1652,12 @@ mod tests {
                 video_downloader_repository.clone(),
                 task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
@@ -1613,6 +1715,12 @@ mod tests {
                 video_downloader_repository.clone(),
                 task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
@@ -1667,6 +1775,12 @@ mod tests {
                 video_downloader_repository.clone(),
                 task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
@@ -1765,6 +1879,12 @@ mod tests {
                 video_downloader_repository.clone(),
                 task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
@@ -1810,6 +1930,12 @@ mod tests {
                 video_downloader_repository.clone(),
                 task_repository.clone(),
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
@@ -1932,6 +2058,12 @@ mod tests {
                 Arc::new(FakeVideoDownloaderRepository::default()),
                 task_repository,
                 Arc::new(FixedClock(fixed_timestamp())),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository::default()),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",

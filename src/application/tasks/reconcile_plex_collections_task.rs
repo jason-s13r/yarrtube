@@ -85,6 +85,27 @@ pub fn schedule_reconcile_plex_collections_if_absent(
     Ok(())
 }
 
+/// Removes a scheduled `reconcile_plex_collections` task left by an earlier
+/// run, for a daemon started with Plex collections off (no Plex
+/// integration, or the tv library layout): no handler is registered then,
+/// so it would otherwise fail and retry until dead-lettered.
+pub fn unschedule_reconcile_plex_collections(
+    task_repository: &Arc<dyn TaskRepository>,
+) -> anyhow::Result<()> {
+    task_repository
+        .list_non_completed()?
+        .into_iter()
+        .filter(|task| task.task_type == Task::ReconcilePlexCollections.task_type())
+        .try_for_each(|task| {
+            task_repository.delete(task.id)?;
+            info!(
+                task_id = task.id,
+                "removed the Plex collections reconcile task, collections are off"
+            );
+            Ok(())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,6 +859,35 @@ mod tests {
                 1,
                 fixed_timestamp() + chrono::Duration::seconds(INTERVAL_SECONDS),
             )]
+        );
+    }
+
+    #[test]
+    fn it_should_unschedule_a_leftover_reconcile_when_collections_are_off() {
+        let db = TestDatabase::new();
+        let task_repository: Arc<dyn TaskRepository> = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let other = Task::ReconcileChannel {
+            channel_id: "@somechannel".to_string(),
+        };
+        task_repository
+            .schedule(&Task::ReconcilePlexCollections, fixed_timestamp())
+            .unwrap();
+        task_repository.schedule(&other, fixed_timestamp()).unwrap();
+
+        let result = unschedule_reconcile_plex_collections(&task_repository);
+
+        assert_eq!(result.map_err(|e| e.to_string()), Ok(()));
+        assert_eq!(
+            task_repository.list_non_completed().unwrap(),
+            vec![ScheduledTask {
+                id: 2,
+                task_type: other.task_type().to_string(),
+                payload: other.payload().to_string(),
+                ..pending_task(2, fixed_timestamp())
+            }]
         );
     }
 

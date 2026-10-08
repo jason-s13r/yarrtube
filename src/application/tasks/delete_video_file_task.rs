@@ -32,7 +32,9 @@ impl TaskHandler for DeleteVideoFileTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
+    use crate::infrastructure::repositories::filesystem_video_file_repository::{
+        FakeVideoFileRepository, FilesystemVideoFileRepository,
+    };
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -152,6 +154,50 @@ mod tests {
         assert_eq!(
             *video_file_repository.deleted_calls.lock().unwrap(),
             vec![deleted("My Video.jpg")]
+        );
+    }
+
+    #[test]
+    fn it_should_delete_only_the_episode_files_of_a_removed_tv_video() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let season_dir = output_dir.path().join("Season 2026");
+        std::fs::create_dir_all(&season_dir).unwrap();
+        [
+            "My Video.mp4",
+            "My Video.jpg",
+            "My Video.nfo",
+            "My Video 2.mp4",
+        ]
+        .iter()
+        .for_each(|file| {
+            std::fs::write(season_dir.join(format!("S2026E01021530 - {file}")), "x").unwrap()
+        });
+        let task = DeleteVideoFileTask::new(VideoFileDeleter::new(
+            Arc::new(FilesystemVideoFileRepository),
+            "/videos",
+        ));
+
+        let result = run(
+            &task,
+            &Task::DeleteVideoFile {
+                filename: Some("Season 2026/S2026E01021530 - My Video.mp4".to_string()),
+                thumbnail_filename: Some("Season 2026/S2026E01021530 - My Video.jpg".to_string()),
+                output_dir: output_dir.path().to_string_lossy().to_string(),
+            }
+            .payload()
+            .to_string(),
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            std::fs::read_dir(&season_dir)
+                .map(|entries| {
+                    entries
+                        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            vec!["S2026E01021530 - My Video 2.mp4".to_string()]
         );
     }
 

@@ -36,12 +36,15 @@ mod tests {
     use crate::domain::playlist_video::{VideoAddedToPlaylist, VideoRemovedFromPlaylist};
     use crate::domain::services::InternalVideoReconciler;
     use crate::domain::services::MetadataGenerator;
+    use crate::domain::services::ShowMetadataWriter;
     use crate::domain::services::ThumbnailFetcher;
+    use crate::domain::shared::LibraryLayout;
     use crate::domain::shared::Quality;
     use crate::domain::task::{ScheduledTask, TaskStatus};
     use crate::domain::video::Video;
     use crate::domain::video::{VideoId, VideoRecordId};
-    use crate::domain::video_metadata::VideoMetadata;
+    use crate::domain::video_metadata::{ShowMetadata, VideoMetadata, render_tvshow_nfo};
+    use crate::infrastructure::repositories::filesystem_show_metadata_repository::FakeShowMetadataRepository;
     use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
     use crate::infrastructure::repositories::sqlite_playlist_repository::{
         PlaylistRepository, SqlitePlaylistRepository,
@@ -74,6 +77,7 @@ mod tests {
     use crate::infrastructure::shared::ytdlp::FetchedThumbnail;
     use chrono::{DateTime, Utc};
     use rusqlite::Connection;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     #[test]
@@ -96,6 +100,7 @@ mod tests {
             Vec::new(),
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL404"));
@@ -146,6 +151,7 @@ mod tests {
             vec![playlist_item("vid1", "One", 0)],
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -209,6 +215,7 @@ mod tests {
             ],
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -277,6 +284,7 @@ mod tests {
             vec![playlist_item("vid1", "Renamed", 0)],
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -319,6 +327,7 @@ mod tests {
             vec![playlist_item("vid1", "One", 2)],
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -362,6 +371,7 @@ mod tests {
             Vec::new(),
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -427,6 +437,7 @@ mod tests {
             Vec::new(),
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -481,6 +492,7 @@ mod tests {
             Vec::new(),
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -516,6 +528,12 @@ mod tests {
             Arc::new(FakeVideoDownloaderRepository::default()),
             task_repository.clone(),
             Arc::new(FixedClock(fixed_timestamp())),
+            Arc::new(MetadataGenerator::new(
+                Arc::new(FakeYoutubeMetadataRepository::default()),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+            LibraryLayout::Movie,
         ));
         let task = ReconcilePlaylistTask::new(PlaylistVideoReconciler::new(
             playlist_repository,
@@ -542,6 +560,11 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
+            Arc::new(ShowMetadataWriter::new(
+                LibraryLayout::Movie,
+                Arc::new(FakeShowMetadataRepository::default()),
+                "/videos",
+            )),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -592,6 +615,7 @@ mod tests {
             vec![member_playlist_item()],
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -647,6 +671,7 @@ mod tests {
             vec![playlist_item("vid1", "Renamed", 0)],
             task_repository.clone(),
             video_file_repository.clone(),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -711,12 +736,23 @@ mod tests {
                     Arc::new(FakeVideoDownloaderRepository::default()),
                     task_repository.clone(),
                     Arc::new(FixedClock(fixed_timestamp())),
+                    Arc::new(MetadataGenerator::new(
+                        Arc::new(FakeYoutubeMetadataRepository::default()),
+                        Arc::new(FixedClock(fixed_timestamp())),
+                    )),
+                    Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                    LibraryLayout::Movie,
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
                 videos_root.path().to_string_lossy(),
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
+            Arc::new(ShowMetadataWriter::new(
+                LibraryLayout::Movie,
+                Arc::new(FakeShowMetadataRepository::default()),
+                "/videos",
+            )),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -802,12 +838,23 @@ mod tests {
                     video_downloader_repository.clone(),
                     task_repository.clone(),
                     Arc::new(FixedClock(fixed_timestamp())),
+                    Arc::new(MetadataGenerator::new(
+                        Arc::new(FakeYoutubeMetadataRepository::default()),
+                        Arc::new(FixedClock(fixed_timestamp())),
+                    )),
+                    Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                    LibraryLayout::Movie,
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
+            Arc::new(ShowMetadataWriter::new(
+                LibraryLayout::Movie,
+                Arc::new(FakeShowMetadataRepository::default()),
+                "/videos",
+            )),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -872,6 +919,7 @@ mod tests {
             vec![playlist_item("vid1", "One", 0)],
             task_repository.clone(),
             Arc::new(FakeVideoFileRepository::default()),
+            movie_show_metadata_writer(),
         ));
 
         let result = run(&task, &payload_for("PL1"));
@@ -887,6 +935,7 @@ mod tests {
     /// configures or asserts; the remaining ports (YouTube metadata, video
     /// metadata, thumbnails) are ones these tests don't observe — the ones
     /// that do build the reconciler inline. Events go to `db`'s outbox table.
+    #[allow(clippy::too_many_arguments)]
     fn playlist_video_reconciler(
         db: &TestDatabase,
         playlist_repository: Arc<SqlitePlaylistRepository>,
@@ -895,12 +944,19 @@ mod tests {
         playlist_items: Vec<YoutubePlaylistItem>,
         task_repository: Arc<SqliteTaskRepository>,
         video_file_repository: Arc<FakeVideoFileRepository>,
+        show_metadata_writer: Arc<ShowMetadataWriter>,
     ) -> PlaylistVideoReconciler {
         let thumbnail_fetcher = Arc::new(ThumbnailFetcher::new(
             video_repository.clone(),
             Arc::new(FakeVideoDownloaderRepository::default()),
             task_repository.clone(),
             Arc::new(FixedClock(fixed_timestamp())),
+            Arc::new(MetadataGenerator::new(
+                Arc::new(FakeYoutubeMetadataRepository::default()),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+            LibraryLayout::Movie,
         ));
         PlaylistVideoReconciler::new(
             playlist_repository,
@@ -929,6 +985,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
+            show_metadata_writer,
         )
     }
 
@@ -966,12 +1023,23 @@ mod tests {
                     Arc::new(FakeVideoDownloaderRepository::default()),
                     task_repository.clone(),
                     Arc::new(FixedClock(fixed_timestamp())),
+                    Arc::new(MetadataGenerator::new(
+                        Arc::new(FakeYoutubeMetadataRepository::default()),
+                        Arc::new(FixedClock(fixed_timestamp())),
+                    )),
+                    Arc::new(SqlitePlaylistVideoRepository::new(unused_connection())),
+                    LibraryLayout::Movie,
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
                 "/videos",
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
+            Arc::new(ShowMetadataWriter::new(
+                LibraryLayout::Movie,
+                Arc::new(FakeShowMetadataRepository::default()),
+                "/videos",
+            )),
         ))
     }
 
@@ -1002,6 +1070,63 @@ mod tests {
             .find_by_video(&video.id)
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn it_should_write_tvshow_nfo_without_a_poster_for_a_playlist_in_tv_layout() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        let show_metadata_repository = Arc::new(FakeShowMetadataRepository::default());
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let task = ReconcilePlaylistTask::new(playlist_video_reconciler(
+            &db,
+            playlist_repository,
+            Arc::new(SqliteVideoRepository::new(db.database())),
+            Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+            Vec::new(),
+            Arc::new(SqliteTaskRepository::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            Arc::new(FakeVideoFileRepository::default()),
+            Arc::new(ShowMetadataWriter::new(
+                LibraryLayout::Tv,
+                show_metadata_repository.clone(),
+                "/videos",
+            )),
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *show_metadata_repository.tvshow_nfos.lock().unwrap(),
+            vec![(
+                PathBuf::from("/videos/my-playlist"),
+                render_tvshow_nfo(&ShowMetadata::for_playlist(&playlist("PL1")))
+            )]
+        );
+        assert_eq!(*show_metadata_repository.posters.lock().unwrap(), vec![]);
+        assert_eq!(
+            render_tvshow_nfo(&ShowMetadata::for_playlist(&playlist("PL1"))),
+            concat!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><tvshow>"#,
+                "<title>My Playlist</title>",
+                "<studio>My Playlist</studio>",
+                r#"<uniqueid type="youtube">PL1</uniqueid>"#,
+                "</tvshow>"
+            )
+        );
+    }
+
+    /// The show metadata writer of a movie-layout install, which writes
+    /// nothing.
+    fn movie_show_metadata_writer() -> Arc<ShowMetadataWriter> {
+        Arc::new(ShowMetadataWriter::new(
+            LibraryLayout::Movie,
+            Arc::new(FakeShowMetadataRepository::default()),
+            "/videos",
+        ))
     }
 
     fn playlist(id: &str) -> Playlist {

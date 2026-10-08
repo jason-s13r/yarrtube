@@ -150,12 +150,8 @@ An episode NFO SHALL have root element `episodedetails` and contain `title`, `se
 - **WHEN** the episode NFO of `S2026E01021530 - My Video.mp4`, published at `2026-01-02T15:30:45Z`, is written
 - **THEN** it has root `episodedetails`, `season` `2026`, `episode` `1021530`, `aired` `2026-01-02` and a `youtube` `uniqueid`
 
-### Requirement: Layout Switch Does Not Migrate Existing Files
-Switching `YARRTUBE_LIBRARY_LAYOUT` to `movie` SHALL NOT rename, move or rewrite files already downloaded. In `tv` layout, already-downloaded videos are moved into the tv layout only as the `tv-layout-migration` capability defines. When metadata is regenerated for an already-downloaded video, its sidecar SHALL follow how its recorded media file was named: an episode NFO beside it when the file's base name starts with an `S<season>E<episode> - ` prefix, otherwise `movie.nfo`.
-
-#### Scenario: Switching an existing install back to movie layout
-- **WHEN** the daemon restarts in `movie` layout with videos previously downloaded in `tv` layout
-- **THEN** those videos' season folders, media files and episode NFOs are left untouched, and only new downloads use the movie layout
+### Requirement: Sidecar Follows The Recorded File's Naming
+Already-downloaded videos SHALL only be moved between layouts as the `tv-layout-migration` and `movie-layout-migration` capabilities define. When metadata is regenerated for an already-downloaded video, its sidecar SHALL follow how its recorded media file was named: an episode NFO beside it when the file is inside a `Season <n>` folder and its base name starts with an `S<season>E<episode> - ` prefix, otherwise `movie.nfo`.
 
 #### Scenario: Metadata repaired for a movie-layout video in TV layout
 - **WHEN** a video downloaded in `movie` layout has its missing metadata regenerated while the layout is `tv`

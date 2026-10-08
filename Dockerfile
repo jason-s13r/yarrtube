@@ -1,4 +1,4 @@
-FROM node:22-slim AS web-build
+FROM docker.io/library/node:22-slim AS web-build
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
@@ -8,7 +8,7 @@ RUN npm run build
 # Dependencies are compiled from a cargo-chef recipe (derived only from the
 # manifests) in their own layer, so a source-only change reuses the cached
 # dependency build instead of recompiling every crate.
-FROM rust:slim-bookworm AS chef
+FROM docker.io/library/rust:slim-bookworm AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /build
 
@@ -31,7 +31,7 @@ RUN cargo build --release --locked
 # self-update (cli/ytdlp_update.rs) is a best-effort upgrade over this floor,
 # not the only source. Kept in its own stage so `curl` never lands in the
 # final runtime image.
-FROM debian:bookworm-slim AS ytdlp-fetch
+FROM docker.io/library/debian:bookworm-slim AS ytdlp-fetch
 ARG TARGETARCH
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -44,7 +44,7 @@ RUN case "${TARGETARCH}" in \
     && curl -fL -o /tmp/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux${YTDLP_SUFFIX}" \
     && chmod +x /tmp/yt-dlp
 
-FROM debian:bookworm-slim AS runtime
+FROM docker.io/library/debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates gosu \
     && rm -rf /var/lib/apt/lists/*
@@ -55,7 +55,7 @@ COPY --from=ytdlp-fetch /tmp/yt-dlp /app/bin/yt-dlp
 # without one it falls back to a limited client that YouTube answers with
 # "This video is not available" for some videos (e.g. made-for-kids ones).
 # Deno is the runtime yt-dlp enables by default and finds it on PATH.
-COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
+COPY --from=docker.io/denoland/deno:bin /deno /usr/local/bin/deno
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

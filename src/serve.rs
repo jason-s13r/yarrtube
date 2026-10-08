@@ -47,6 +47,8 @@ const DEFAULT_PLEX_RECONCILE_INTERVAL_SECONDS: i64 = 900;
 /// install.
 const DEFAULT_STORAGE_DIRECTORIES: &[&str] = &["playlists", "channels"];
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+/// How long shutdown waits for in-flight blocking work before exiting.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 fn port() -> u16 {
@@ -589,12 +591,39 @@ async fn run_async(
     tokio::spawn(Arc::new(event_consumer(&infrastructure, plex)).run(BACKGROUND_POLL_INTERVAL));
     tokio::spawn(task_executor.run(BACKGROUND_POLL_INTERVAL));
 
-    if let Err(e) = serve_http(port(), api_services(&infrastructure)).await {
-        error!(error = %e, "HTTP server failed");
-        return ExitCode::FAILURE;
+    tokio::select! {
+        result = serve_http(port(), api_services(&infrastructure)) => {
+            if let Err(e) = result {
+                error!(error = %e, "HTTP server failed");
+                return ExitCode::FAILURE;
+            }
+        }
+        () = shutdown_signal() => info!("shutdown signal received, stopping"),
     }
 
     ExitCode::SUCCESS
+}
+
+/// Resolves on SIGTERM (`docker stop`/`podman stop`/systemd) or Ctrl+C.
+/// Inside a container yarrtube runs as PID 1, which the kernel never kills
+/// on an unhandled SIGTERM, so without this a stop always waits for its
+/// timeout and ends in SIGKILL.
+async fn shutdown_signal() {
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                sigterm.recv().await;
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        () = terminate => {}
+    }
 }
 
 pub fn run() -> ExitCode {
@@ -644,7 +673,11 @@ pub fn run() -> ExitCode {
         }
     };
 
-    runtime.block_on(run_async(infrastructure, task_executor, plex))
+    let exit_code = runtime.block_on(run_async(infrastructure, task_executor, plex));
+    // Don't wait on blocking work such as a download in progress: a task
+    // left running is recovered and retried on the next start.
+    runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
+    exit_code
 }
 
 #[cfg(test)]

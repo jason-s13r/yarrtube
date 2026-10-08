@@ -214,10 +214,15 @@ Things to know:
 - **Show files for every source:** each sync pass writes `tvshow.nfo` and
   the poster for every tracked channel and playlist, including ones you
   tracked before switching to `tv`.
-- **Existing files are not migrated.** Switching the layout only affects new
-  downloads; videos already downloaded keep their folders and `movie.nfo`.
-  Start from an empty videos folder (or re-add your channels and playlists)
-  to have everything in the TV layout.
+- **Existing downloads are moved into the TV layout.** On each sync,
+  videos downloaded before you switched (each in its own folder with a
+  `movie.nfo`) are moved into their season folder under their episode name,
+  with an episode NFO, without downloading them again. Plex sees each moved
+  video as a new item, so its Plex watch history starts over; yarrtube's own
+  watched state is kept. Run a library scan in Plex once the first sync has
+  finished. A video whose publish date yarrtube can't get from YouTube stays
+  where it is until a later sync can. Switching back to `movie` doesn't move
+  files.
 - In this layout yarrtube needs a video's YouTube metadata to name its file,
   so a video whose metadata can't be fetched is retried later instead of
   being downloaded under a name Plex can't place.

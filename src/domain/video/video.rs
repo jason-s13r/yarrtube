@@ -2,7 +2,7 @@ use super::playback_position::PlaybackPosition;
 use super::video_duration::VideoDuration;
 use super::video_filename::video_folder_candidates;
 use super::video_id::VideoId;
-use super::video_output_entry::video_entry;
+use super::video_output_entry::{is_season_dir, video_entry};
 use super::video_record_id::VideoRecordId;
 use super::video_status::VideoStatus;
 use crate::domain::shared::Quality;
@@ -270,6 +270,38 @@ impl Video {
     /// nor an `Errored` one, whose recovery redownload writes its own.
     pub fn is_thumbnail_fetchable(&self) -> bool {
         !matches!(self.status, VideoStatus::Excluded | VideoStatus::Errored)
+    }
+
+    /// Downloaded, and its recorded file isn't directly inside a TV-layout
+    /// season folder yet (a movie-layout folder, a legacy flat file, or a
+    /// first-build episode folder), so the tv layout migration moves it.
+    pub fn needs_tv_layout_migration(&self) -> bool {
+        let in_season_dir = |filename: &str| {
+            filename
+                .split_once('/')
+                .is_some_and(|(season, file)| is_season_dir(season) && !file.contains('/'))
+        };
+        self.status == VideoStatus::Downloaded
+            && self
+                .filename
+                .as_deref()
+                .is_some_and(|filename| !in_season_dir(filename))
+    }
+
+    /// The video's files moved: records their new paths, nothing else
+    /// changes.
+    pub fn relocate(
+        self,
+        filename: impl Into<String>,
+        thumbnail_filename: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            filename: Some(filename.into()),
+            thumbnail_filename,
+            updated_at: now,
+            ..self
+        }
     }
 
     /// The per-video folder this video's files already live in: the

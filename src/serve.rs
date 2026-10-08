@@ -547,6 +547,7 @@ fn internal_video_reconciler(
         thumbnail_fetcher(infrastructure, layout),
         infrastructure.clock.clone(),
         videos_path(),
+        layout,
     ))
 }
 

@@ -45,7 +45,9 @@ mod tests {
     use crate::domain::video::{VideoId, VideoRecordId};
     use crate::domain::video_metadata::{ShowMetadata, VideoMetadata, render_tvshow_nfo};
     use crate::infrastructure::repositories::filesystem_show_metadata_repository::FakeShowMetadataRepository;
-    use crate::infrastructure::repositories::filesystem_video_file_repository::FakeVideoFileRepository;
+    use crate::infrastructure::repositories::filesystem_video_file_repository::{
+        FakeVideoFileRepository, FilesystemVideoFileRepository,
+    };
     use crate::infrastructure::repositories::sqlite_playlist_repository::{
         PlaylistRepository, SqlitePlaylistRepository,
     };
@@ -557,6 +559,7 @@ mod tests {
                 thumbnail_fetcher,
                 Arc::new(FixedClock(fixed_timestamp())),
                 "/videos",
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
@@ -688,6 +691,99 @@ mod tests {
     }
 
     #[test]
+    fn it_should_migrate_a_legacy_flat_playlist_video_by_its_position_in_tv_layout() {
+        let db = TestDatabase::new();
+        let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
+        let video_repository = Arc::new(SqliteVideoRepository::new(db.database()));
+        let playlist_video_repository = Arc::new(SqlitePlaylistVideoRepository::new(db.database()));
+        let task_repository = Arc::new(SqliteTaskRepository::new(
+            db.database(),
+            Arc::new(FixedClock(fixed_timestamp())),
+        ));
+        let videos_root = tempfile::tempdir().unwrap();
+        let output_dir = videos_root.path().join("my-playlist");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(output_dir.join("My Video.mp4"), "mp4").unwrap();
+        playlist_repository.insert(&playlist("PL1")).unwrap();
+        let video = downloaded_video("My Video.mp4", None);
+        save_playlist_video(
+            video_repository.as_ref(),
+            playlist_video_repository.as_ref(),
+            &video,
+            3,
+        );
+        let task = ReconcilePlaylistTask::new(PlaylistVideoReconciler::new(
+            playlist_repository,
+            video_repository.clone(),
+            playlist_video_repository,
+            Arc::new(FakeYoutubePlaylistItemsRepository::with_videos(vec![
+                playlist_item("vid1", "My Video", 3),
+            ])),
+            Arc::new(SqliteEventPublisher::new(
+                db.database(),
+                Arc::new(FixedClock(fixed_timestamp())),
+            )),
+            task_repository.clone(),
+            Arc::new(InternalVideoReconciler::new(
+                video_repository.clone(),
+                Arc::new(MetadataGenerator::new(
+                    Arc::new(FakeYoutubeMetadataRepository {
+                        metadata: Some(youtube_metadata("My Video")),
+                    }),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                )),
+                Arc::new(SqliteVideoMetadataRepository::new(db.database())),
+                task_repository.clone(),
+                Arc::new(FilesystemVideoFileRepository),
+                Arc::new(ThumbnailFetcher::new(
+                    video_repository.clone(),
+                    Arc::new(FakeVideoDownloaderRepository::default()),
+                    task_repository.clone(),
+                    Arc::new(FixedClock(fixed_timestamp())),
+                    Arc::new(MetadataGenerator::new(
+                        Arc::new(FakeYoutubeMetadataRepository::default()),
+                        Arc::new(FixedClock(fixed_timestamp())),
+                    )),
+                    Arc::new(SqlitePlaylistVideoRepository::new(db.database())),
+                    LibraryLayout::Tv,
+                )),
+                Arc::new(FixedClock(fixed_timestamp())),
+                videos_root.path().to_string_lossy(),
+                LibraryLayout::Tv,
+            )),
+            Arc::new(FixedClock(fixed_timestamp())),
+            3600,
+            movie_show_metadata_writer(),
+        ));
+
+        let result = run(&task, &payload_for("PL1"));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            video_repository.list().unwrap(),
+            vec![Video {
+                filename: Some("Season 01/S01E03 - My Video.mp4".to_string()),
+                ..video.clone()
+            }]
+        );
+        let mut season_files: Vec<String> = std::fs::read_dir(output_dir.join("Season 01"))
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .collect()
+            })
+            .unwrap_or_default();
+        season_files.sort();
+        assert_eq!(
+            season_files,
+            vec![
+                "S01E03 - My Video.mp4".to_string(),
+                "S01E03 - My Video.nfo".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn it_should_generate_missing_metadata() {
         let db = TestDatabase::new();
         let playlist_repository = Arc::new(SqlitePlaylistRepository::new(db.database()));
@@ -745,6 +841,7 @@ mod tests {
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
                 videos_root.path().to_string_lossy(),
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
@@ -847,6 +944,7 @@ mod tests {
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
                 "/videos",
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
@@ -982,6 +1080,7 @@ mod tests {
                 thumbnail_fetcher,
                 Arc::new(FixedClock(fixed_timestamp())),
                 "/videos",
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,
@@ -1032,6 +1131,7 @@ mod tests {
                 )),
                 Arc::new(FixedClock(fixed_timestamp())),
                 "/videos",
+                LibraryLayout::Movie,
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             3600,

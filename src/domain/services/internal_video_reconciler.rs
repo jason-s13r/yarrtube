@@ -2,14 +2,15 @@ use crate::domain::playlist::PlaylistPath;
 use crate::domain::services::{
     MetadataGenerator, MetadataGeneratorApi, ThumbnailFetcher, ThumbnailFetcherApi,
 };
-use crate::domain::shared::Quality;
+use crate::domain::shared::{LibraryLayout, Quality};
 use crate::domain::task::{ScheduledTask, Task};
 use crate::domain::video::VideoRecordId;
+use crate::domain::video::video_filename::{collision_suffixed_folder, episode_folder_name};
 use crate::domain::video::{
     Video, VideoStatus, entry_owns, is_named_after, is_season_dir, resolve_output_dir,
     strip_episode_prefix, video_dir_for_filename, video_entry,
 };
-use crate::domain::video_metadata::{NfoFile, TVSHOW_NFO_FILENAME};
+use crate::domain::video_metadata::{EpisodeNumber, NfoFile, TVSHOW_NFO_FILENAME, VideoMetadata};
 use crate::infrastructure::repositories::filesystem_video_file_repository::VideoFileRepository;
 use crate::infrastructure::repositories::sqlite_task_repository::TaskRepository;
 use crate::infrastructure::repositories::sqlite_video_metadata_repository::VideoMetadataRepository;
@@ -63,6 +64,7 @@ pub struct InternalVideoReconciler {
     thumbnail_fetcher: Arc<ThumbnailFetcher>,
     clock: Arc<dyn Clock>,
     videos_path: String,
+    layout: LibraryLayout,
 }
 
 impl InternalVideoReconciler {
@@ -76,6 +78,7 @@ impl InternalVideoReconciler {
         thumbnail_fetcher: Arc<ThumbnailFetcher>,
         clock: Arc<dyn Clock>,
         videos_path: impl Into<String>,
+        layout: LibraryLayout,
     ) -> Self {
         Self {
             video_repository,
@@ -86,6 +89,7 @@ impl InternalVideoReconciler {
             thumbnail_fetcher,
             clock,
             videos_path: videos_path.into(),
+            layout,
         }
     }
 }
@@ -122,7 +126,9 @@ impl InternalVideoReconcilerApi for InternalVideoReconciler {
         self.thumbnail_fetcher
             .schedule_missing(&actual.videos, &handled, &actual.output_dir)?;
 
-        self.delete_orphaned_files(&actual)
+        self.delete_orphaned_files(&actual)?;
+        self.migrate_to_tv_layout(desired, &actual);
+        Ok(())
     }
 }
 
@@ -339,6 +345,163 @@ impl InternalVideoReconciler {
             })
     }
 
+    /// In the tv layout, moves every downloaded video whose files aren't
+    /// directly in a season folder yet into it. Runs last in a pass, after
+    /// orphan cleanup, which protects files by their recorded paths.
+    fn migrate_to_tv_layout(&self, desired: &DesiredState, actual: &ActualState) {
+        if self.layout != LibraryLayout::Tv {
+            return;
+        }
+        actual
+            .videos
+            .iter()
+            .filter(|video| video.needs_tv_layout_migration())
+            .for_each(|video| {
+                if let Err(e) = self.migrate_video(desired, actual, video) {
+                    warn!(video_id = %video.id, error = %e, "failed to move the video into the tv layout, retrying next pass");
+                }
+            });
+    }
+
+    /// Moves one downloaded video's media file and thumbnail into its
+    /// season folder under its episode name, records the new paths and its
+    /// episode NFO, then deletes its old folder. Skipped (logged) when its
+    /// publish time is unknown.
+    fn migrate_video(
+        &self,
+        desired: &DesiredState,
+        actual: &ActualState,
+        video: &Video,
+    ) -> anyhow::Result<()> {
+        let sort_position = desired.sort_positions.get(&video.id).copied();
+        let Some(metadata) = self.migration_metadata(video, sort_position)? else {
+            info!(video_id = %video.id, "publish time unknown, not moving the video into the tv layout yet");
+            return Ok(());
+        };
+        let episode = EpisodeNumber::resolve(metadata.published_at, sort_position);
+        let season = episode.season_dir();
+        let basename = self.claim_episode_name(&actual.output_dir, &season, episode, video)?;
+        let old_filename = video.filename.as_deref().unwrap_or_default();
+        let filename = moved_path(&season, &basename, old_filename);
+        self.video_file_repository
+            .rename(&actual.output_dir, old_filename, &filename)?;
+        let thumbnail = self.move_thumbnail(&actual.output_dir, video, &season, &basename);
+        let every_file_moved = video.thumbnail_filename.is_none() || thumbnail.is_some();
+        self.video_repository.update(&video.clone().relocate(
+            filename,
+            thumbnail.clone(),
+            self.clock.now(),
+        ))?;
+        self.save_episode_metadata(
+            video,
+            metadata,
+            episode,
+            &basename,
+            thumbnail.as_deref(),
+            &actual.output_dir.join(&season),
+        );
+        if every_file_moved {
+            self.remove_old_folder(&actual.output_dir, old_filename);
+        }
+        info!(video_id = %video.id, episode = %basename, "moved the video into the tv layout");
+        Ok(())
+    }
+
+    /// The video's stored metadata, else its YouTube metadata.
+    fn migration_metadata(
+        &self,
+        video: &Video,
+        sort_position: Option<i64>,
+    ) -> anyhow::Result<Option<VideoMetadata>> {
+        Ok(match self.video_metadata_repository.find(&video.id)? {
+            Some(metadata) => Some(metadata),
+            None => self.metadata_generator.generate(video, sort_position, None),
+        })
+    }
+
+    /// The video's episode name, or its collision-suffixed form when
+    /// another video's file in the season folder already uses it.
+    fn claim_episode_name(
+        &self,
+        output_dir: &Path,
+        season: &str,
+        episode: EpisodeNumber,
+        video: &Video,
+    ) -> anyhow::Result<String> {
+        let name = episode_folder_name(episode, &video.title);
+        let own_entry = video
+            .filename
+            .as_deref()
+            .map(video_entry)
+            .unwrap_or_default();
+        let taken = self
+            .video_file_repository
+            .list(&output_dir.join(season))?
+            .iter()
+            .filter(|file| !entry_owns(own_entry, &format!("{season}/{file}")))
+            .any(|file| is_named_after(file, name.as_str()));
+        Ok(if taken {
+            collision_suffixed_folder(name.as_str(), video.youtube_id.as_str())
+        } else {
+            name.as_str().to_string()
+        })
+    }
+
+    /// Best-effort: without it the video keeps no thumbnail, which the
+    /// missing-thumbnail recovery fetches again.
+    fn move_thumbnail(
+        &self,
+        output_dir: &Path,
+        video: &Video,
+        season: &str,
+        basename: &str,
+    ) -> Option<String> {
+        let old = video.thumbnail_filename.as_deref()?;
+        let moved = moved_path(season, basename, old);
+        match self.video_file_repository.rename(output_dir, old, &moved) {
+            Ok(()) => Some(moved),
+            Err(e) => {
+                warn!(video_id = %video.id, error = %e, "failed to move the thumbnail into the tv layout");
+                None
+            }
+        }
+    }
+
+    /// Best-effort: the next pass repairs missing metadata.
+    fn save_episode_metadata(
+        &self,
+        video: &Video,
+        metadata: VideoMetadata,
+        episode: EpisodeNumber,
+        basename: &str,
+        thumbnail: Option<&str>,
+        season_dir: &Path,
+    ) {
+        let thumb = thumbnail
+            .and_then(|t| Path::new(t).file_name())
+            .and_then(|t| t.to_str())
+            .map(str::to_string);
+        let metadata = metadata.with_thumb(thumb);
+        let nfo = NfoFile::episode(&metadata, episode, basename);
+        if let Err(e) = self
+            .video_metadata_repository
+            .save(&video.id, &metadata, &nfo, season_dir)
+        {
+            warn!(video_id = %video.id, error = %e, "failed to save the migrated video's metadata");
+        }
+    }
+
+    /// Best-effort: an unrecorded leftover folder is an orphan the next
+    /// pass deletes.
+    fn remove_old_folder(&self, output_dir: &Path, old_filename: &str) {
+        let Some((folder, _)) = old_filename.rsplit_once('/') else {
+            return;
+        };
+        if let Err(e) = self.video_file_repository.delete(output_dir, folder) {
+            warn!(folder, error = %e, "failed to remove the folder a migrated video left");
+        }
+    }
+
     /// Deletes every top-level entry of the output folder that doesn't
     /// belong to a stored video.
     fn delete_orphaned_files(&self, actual: &ActualState) -> anyhow::Result<()> {
@@ -425,6 +588,15 @@ impl ActualState {
                         .iter()
                         .any(|folder| is_named_after(title, folder))
                 })
+    }
+}
+
+/// `old` (a media file or thumbnail) moved into `season` under `basename`,
+/// keeping its extension.
+fn moved_path(season: &str, basename: &str, old: &str) -> String {
+    match Path::new(old).extension().and_then(|e| e.to_str()) {
+        Some(extension) => format!("{season}/{basename}.{extension}"),
+        None => format!("{season}/{basename}"),
     }
 }
 
@@ -1346,6 +1518,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             videos_root.path().to_string_lossy(),
+            LibraryLayout::Movie,
         );
         let desired = desired_state(vec![(video.clone(), 3)]);
 
@@ -1424,6 +1597,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             videos_root.path().to_string_lossy(),
+            LibraryLayout::Movie,
         );
         let desired = DesiredState {
             sort_positions: HashMap::new(),
@@ -1529,6 +1703,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             videos_root.path().to_string_lossy(),
+            LibraryLayout::Movie,
         );
         let desired = desired_state(vec![(video.clone(), 3)]);
 
@@ -1595,6 +1770,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             videos_root.path().to_string_lossy(),
+            LibraryLayout::Movie,
         );
         let desired = desired_state(vec![(video.clone(), 3)]);
 
@@ -1661,6 +1837,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
+            LibraryLayout::Movie,
         );
         let desired = desired_state(vec![(video.clone(), 0)]);
 
@@ -1724,6 +1901,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
+            LibraryLayout::Movie,
         );
         let desired = desired_state(vec![(video.clone(), 0)]);
 
@@ -1784,6 +1962,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
+            LibraryLayout::Movie,
         );
         let desired = desired_state(vec![(video.clone(), 0)]);
 
@@ -1888,6 +2067,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
+            LibraryLayout::Movie,
         );
         let desired = desired_state(vec![(video.clone(), 0)]);
 
@@ -1939,6 +2119,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
+            LibraryLayout::Movie,
         );
         let desired = desired_state(vec![(video.clone(), 0)]);
 
@@ -2067,6 +2248,7 @@ mod tests {
             )),
             Arc::new(FixedClock(fixed_timestamp())),
             "/videos",
+            LibraryLayout::Movie,
         )
     }
 

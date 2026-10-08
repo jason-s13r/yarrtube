@@ -34,11 +34,30 @@ pub trait VideoFileRepository: Send + Sync {
     /// check, which needs to test one specific recorded path directly
     /// rather than intersect against a top-level directory listing.
     fn file_exists(&self, output_dir: &Path, filename: &str) -> bool;
+
+    /// Moves `from` to `to` (both relative to `output_dir`), creating `to`'s
+    /// parent folders. Fails if `from` is missing or `to` already exists.
+    fn rename(&self, output_dir: &Path, from: &str, to: &str) -> anyhow::Result<()>;
 }
 
 pub struct FilesystemVideoFileRepository;
 
 impl VideoFileRepository for FilesystemVideoFileRepository {
+    fn rename(&self, output_dir: &Path, from: &str, to: &str) -> anyhow::Result<()> {
+        let (from, to) = (output_dir.join(from), output_dir.join(to));
+        if std::fs::symlink_metadata(&to).is_ok() {
+            return Err(anyhow::anyhow!(
+                "not moving {from:?}: {to:?} already exists"
+            ));
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("failed to create folder {parent:?}: {e}"))?;
+        }
+        std::fs::rename(&from, &to)
+            .map_err(|e| anyhow::anyhow!("failed to move {from:?} to {to:?}: {e}"))
+    }
+
     fn delete(&self, output_dir: &Path, filename: &str) -> anyhow::Result<bool> {
         let path = output_dir.join(filename);
         let metadata = match std::fs::symlink_metadata(&path) {
@@ -133,6 +152,10 @@ pub struct FakeVideoFileRepository {
     pub(crate) list_snapshot: std::sync::Mutex<Option<Vec<String>>>,
     pub(crate) deleted_dirs: std::sync::Mutex<Vec<std::path::PathBuf>>,
     pub(crate) file_exists_result: std::sync::Mutex<Option<bool>>,
+    /// Every `rename` call: (output dir, from, to).
+    #[allow(clippy::type_complexity)]
+    pub(crate) rename_calls: std::sync::Mutex<Vec<(std::path::PathBuf, String, String)>>,
+    pub(crate) rename_fails: bool,
 }
 
 #[cfg(test)]
@@ -145,6 +168,8 @@ impl FakeVideoFileRepository {
             list_snapshot: std::sync::Mutex::new(None),
             deleted_dirs: std::sync::Mutex::new(Vec::new()),
             file_exists_result: std::sync::Mutex::new(None),
+            rename_calls: std::sync::Mutex::new(Vec::new()),
+            rename_fails: false,
         }
     }
 
@@ -156,6 +181,16 @@ impl FakeVideoFileRepository {
             list_snapshot: std::sync::Mutex::new(Some(files)),
             deleted_dirs: std::sync::Mutex::new(Vec::new()),
             file_exists_result: std::sync::Mutex::new(None),
+            rename_calls: std::sync::Mutex::new(Vec::new()),
+            rename_fails: false,
+        }
+    }
+
+    /// Fails every `rename`, recording nothing.
+    pub fn with_rename_error(self) -> Self {
+        Self {
+            rename_fails: true,
+            ..self
         }
     }
 
@@ -167,12 +202,26 @@ impl FakeVideoFileRepository {
             list_snapshot: std::sync::Mutex::new(None),
             deleted_dirs: std::sync::Mutex::new(Vec::new()),
             file_exists_result: std::sync::Mutex::new(Some(exists)),
+            rename_calls: std::sync::Mutex::new(Vec::new()),
+            rename_fails: false,
         }
     }
 }
 
 #[cfg(test)]
 impl VideoFileRepository for FakeVideoFileRepository {
+    fn rename(&self, output_dir: &Path, from: &str, to: &str) -> anyhow::Result<()> {
+        if self.rename_fails {
+            return Err(anyhow::anyhow!("fake rename error"));
+        }
+        self.rename_calls.lock().unwrap().push((
+            output_dir.to_path_buf(),
+            from.to_string(),
+            to.to_string(),
+        ));
+        Ok(())
+    }
+
     fn delete(&self, output_dir: &Path, filename: &str) -> anyhow::Result<bool> {
         self.deleted_calls
             .lock()
@@ -212,6 +261,68 @@ impl VideoFileRepository for FakeVideoFileRepository {
 mod tests {
     use super::*;
     use crate::infrastructure::shared::ytdlp::test_support::unique_temp_dir;
+
+    #[test]
+    fn it_should_rename_a_file_creating_its_parent_folder() {
+        let dir = unique_temp_dir("video-file-repository-rename");
+        std::fs::create_dir_all(dir.join("My Video")).unwrap();
+        std::fs::write(dir.join("My Video/My Video.mp4"), b"mp4").unwrap();
+
+        let result = FilesystemVideoFileRepository.rename(
+            &dir,
+            "My Video/My Video.mp4",
+            "Season 2026/S2026E01021530 - My Video.mp4",
+        );
+
+        assert_eq!(
+            (
+                result.is_ok(),
+                std::fs::read(dir.join("Season 2026/S2026E01021530 - My Video.mp4")).ok(),
+                dir.join("My Video/My Video.mp4").exists()
+            ),
+            (true, Some(b"mp4".to_vec()), false)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_refuse_to_rename_over_an_existing_file() {
+        let dir = unique_temp_dir("video-file-repository-rename-existing");
+        std::fs::write(dir.join("old.mp4"), b"old").unwrap();
+        std::fs::write(dir.join("taken.mp4"), b"taken").unwrap();
+
+        let result = FilesystemVideoFileRepository.rename(&dir, "old.mp4", "taken.mp4");
+
+        assert_eq!(
+            (
+                result.is_err(),
+                std::fs::read(dir.join("taken.mp4")).ok(),
+                std::fs::read(dir.join("old.mp4")).ok()
+            ),
+            (true, Some(b"taken".to_vec()), Some(b"old".to_vec()))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn it_should_fail_to_rename_a_missing_file() {
+        let dir = unique_temp_dir("video-file-repository-rename-missing");
+
+        let result = FilesystemVideoFileRepository.rename(
+            &dir,
+            "gone.mp4",
+            "Season 2026/S2026E01021530 - Gone.mp4",
+        );
+
+        assert_eq!(
+            (
+                result.is_err(),
+                dir.join("Season 2026/S2026E01021530 - Gone.mp4").exists()
+            ),
+            (true, false)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn it_should_delete_a_file_matching_the_exact_filename() {

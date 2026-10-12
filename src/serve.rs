@@ -29,7 +29,9 @@ use axum::routing::get;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::sync::oneshot;
 use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -588,6 +590,7 @@ async fn run_async(
     infrastructure: InfrastructureContainer,
     task_executor: Arc<TaskExecutor>,
     plex: Option<PlexIntegration>,
+    shutdown: oneshot::Receiver<()>,
 ) -> ExitCode {
     tokio::spawn(heartbeat_loop());
     tokio::spawn(Arc::new(event_consumer(&infrastructure, plex)).run(BACKGROUND_POLL_INTERVAL));
@@ -600,7 +603,7 @@ async fn run_async(
                 return ExitCode::FAILURE;
             }
         }
-        () = shutdown_signal() => info!("shutdown signal received, stopping"),
+        _ = shutdown => info!("shutdown signal received, stopping"),
     }
 
     ExitCode::SUCCESS
@@ -637,9 +640,38 @@ pub fn run() -> ExitCode {
         )
         .init();
 
-    // These use a blocking HTTP client, so they run before the tokio runtime
-    // starts rather than inside it (a blocking client can't run on a tokio
-    // worker thread).
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            error!(error = %e, "failed to start async runtime");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Listen for shutdown signals before the blocking startup work below, so
+    // a stop that arrives during startup (e.g. while yt-dlp updates) exits
+    // right away instead of being ignored until SIGKILL. Nothing has started
+    // downloading yet, so exiting the process there is safe.
+    let startup_done = Arc::new(AtomicBool::new(false));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    runtime.spawn({
+        let startup_done = Arc::clone(&startup_done);
+        async move {
+            shutdown_signal().await;
+            if !startup_done.load(Ordering::SeqCst) {
+                info!("shutdown signal received during startup, exiting");
+                std::process::exit(0);
+            }
+            let _ = shutdown_tx.send(());
+        }
+    });
+
+    // These use a blocking HTTP client, so they run on this thread outside the
+    // tokio runtime rather than inside it (a blocking client can't run on a
+    // tokio worker thread).
     run_startup_ytdlp_update();
     run_startup_database_check();
     run_startup_youtube_api_key_check();
@@ -664,18 +696,8 @@ pub fn run() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            error!(error = %e, "failed to start async runtime");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let exit_code = runtime.block_on(run_async(infrastructure, task_executor, plex));
+    startup_done.store(true, Ordering::SeqCst);
+    let exit_code = runtime.block_on(run_async(infrastructure, task_executor, plex, shutdown_rx));
     // Don't wait on blocking work such as a download in progress: a task
     // left running is recovered and retried on the next start.
     runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
